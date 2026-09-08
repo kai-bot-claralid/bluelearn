@@ -167,14 +167,14 @@ function App() {
         <button className="back" onClick={() => setMode('edit')}>← Salir del repaso</button>
         {!dueCards.length ? <div className="complete"><span>✓</span><h1>Todo al día</h1><p>No tienes tarjetas pendientes en este mazo.</p><button className="primary" onClick={() => setMode('edit')}>Volver al mazo</button></div> : <>
           <div className="progress"><span>{studyIndex + 1} de {dueCards.length}</span><i><b style={{width: `${((studyIndex + 1) / dueCards.length) * 100}%`}}/></i></div>
-          <button className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)}>
+          <button className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
             {dueCards[studyIndex].image && <img src={dueCards[studyIndex].image} alt=""/>}
             <p className="eyebrow">{revealed ? 'RESPUESTA' : 'PREGUNTA'}</p>
             <h2>{revealed ? dueCards[studyIndex].back : dueCards[studyIndex].front}</h2>
             {revealed && dueCards[studyIndex].description && <p>{dueCards[studyIndex].description}</p>}
-            {!revealed && <small>Toca para revelar</small>}
+            {!revealed && <small><b>TOCA</b> para ver la respuesta</small>}
           </button>
-          {revealed && <div className="ratings"><button onClick={() => rateCard('again')}>Otra vez<small>10 min</small></button><button onClick={() => rateCard('hard')}>Difícil<small>1 día</small></button><button onClick={() => rateCard('good')}>Bien<small>2 días</small></button><button onClick={() => rateCard('easy')}>Fácil<small>4 días</small></button></div>}
+          {revealed && <div className="quick-rating"><p>¿Cómo te fue?</p><div><button className="hard" onClick={() => rateCard('hard')}><span>↺</span><strong>Difícil</strong><small>Ver antes</small></button><button className="easy" onClick={() => rateCard('easy')}><strong>Fácil</strong><span>→</span><small>Siguiente</small></button></div></div>}
         </>}
       </main>}
     </div>
