@@ -21,6 +21,8 @@ type Deck = {
   cards: Card[]
 }
 
+type StudyItem = { deckId: string; cardId: string }
+
 const DAY = 86_400_000
 const COLORS = ['#1769ff', '#ff6b5f', '#f4b942', '#24a47f', '#8b5cf6']
 
@@ -69,8 +71,10 @@ function App() {
   const [selectedImage, setSelectedImage] = useState('')
   const [imageResults, setImageResults] = useState<{title: string, url: string}[]>([])
   const [loadingImages, setLoadingImages] = useState(false)
+  const [showEnhancements, setShowEnhancements] = useState(false)
   const [revealed, setRevealed] = useState(false)
   const [studyIndex, setStudyIndex] = useState(0)
+  const [studyQueue, setStudyQueue] = useState<StudyItem[]>([])
 
   useEffect(() => localStorage.setItem('bluelearn-decks', JSON.stringify(decks)), [decks])
 
@@ -78,6 +82,9 @@ function App() {
   const dueCards = useMemo(() => deck?.cards.filter(card => new Date(card.nextReview) <= new Date()) ?? [], [deck])
   const totalCards = decks.reduce((sum, item) => sum + item.cards.length, 0)
   const totalDue = decks.flatMap(item => item.cards).filter(card => new Date(card.nextReview) <= new Date()).length
+  const studyItem = studyQueue[studyIndex]
+  const studyDeck = decks.find(item => item.id === studyItem?.deckId)
+  const studyCard = studyDeck?.cards.find(card => card.id === studyItem?.cardId)
 
   function createDeck(event: FormEvent) {
     event.preventDefault()
@@ -92,7 +99,7 @@ function App() {
     if (!deck || !front.trim() || !back.trim()) return
     const card: Card = { id: uid(), front: front.trim(), back: back.trim(), description: description.trim(), image: selectedImage || undefined, nextReview: today(), interval: 0, ease: 2.5 }
     setDecks(current => current.map(item => item.id === deck.id ? { ...item, cards: [...item.cards, card] } : item))
-    setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([])
+    setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
   }
 
   function writeDescription() {
@@ -109,23 +116,32 @@ function App() {
     finally { setLoadingImages(false) }
   }
 
-  function rateCard(rating: 'again' | 'hard' | 'good' | 'easy') {
-    const card = dueCards[studyIndex]
-    if (!deck || !card) return
-    const nextInterval = rating === 'again' ? 0 : rating === 'hard' ? Math.max(1, card.interval * 1.2 || 1) : rating === 'good' ? Math.max(1, card.interval * card.ease || 2) : Math.max(4, card.interval * (card.ease + .35) || 4)
-    const nextReview = new Date(Date.now() + (rating === 'again' ? 10 * 60_000 : nextInterval * DAY)).toISOString()
-    setDecks(current => current.map(item => item.id === deck.id ? { ...item, cards: item.cards.map(candidate => candidate.id === card.id ? { ...candidate, interval: nextInterval, ease: Math.max(1.3, card.ease + (rating === 'hard' ? -.15 : rating === 'easy' ? .15 : 0)), nextReview } : candidate) } : item))
-    setRevealed(false)
-    if (studyIndex >= dueCards.length - 1) { setStudyIndex(0); setMode('edit') } else setStudyIndex(value => value + 1)
+  function startStudy(deckId?: string) {
+    const queue = decks.flatMap(item => item.cards
+      .filter(card => (!deckId || item.id === deckId) && new Date(card.nextReview) <= new Date())
+      .map(card => ({ deckId: item.id, cardId: card.id })))
+    if (!queue.length) return
+    if (!deckId) setActiveDeck(null)
+    setStudyQueue(queue); setStudyIndex(0); setRevealed(false); setMode('study')
   }
 
-  function goHome() { setMode('library'); setActiveDeck(null); setRevealed(false) }
+  function rateCard(rating: 'hard' | 'easy') {
+    const card = studyCard
+    if (!studyDeck || !card) return
+    const nextInterval = rating === 'hard' ? Math.max(1, card.interval * 1.2 || 1) : Math.max(4, card.interval * (card.ease + .35) || 4)
+    const nextReview = new Date(Date.now() + nextInterval * DAY).toISOString()
+    setDecks(current => current.map(item => item.id === studyDeck.id ? { ...item, cards: item.cards.map(candidate => candidate.id === card.id ? { ...candidate, interval: nextInterval, ease: Math.max(1.3, card.ease + (rating === 'hard' ? -.15 : .15)), nextReview } : candidate) } : item))
+    setRevealed(false)
+    if (studyIndex >= studyQueue.length - 1) { setStudyIndex(0); setStudyQueue([]); setMode(activeDeck ? 'edit' : 'library') } else setStudyIndex(value => value + 1)
+  }
+
+  function goHome() { setMode('library'); setActiveDeck(null); setStudyQueue([]); setRevealed(false) }
 
   return (
     <div className="app-shell">
       <header>
         <button className="brand" onClick={goHome}><span>◒</span> Bluelearn</button>
-        <nav><button className={mode === 'library' ? 'active' : ''} onClick={goHome}>Biblioteca</button><button onClick={() => activeDeck && setMode('study')}>Repasar <b>{totalDue}</b></button></nav>
+        <nav><button className={mode === 'library' ? 'active' : ''} onClick={goHome}>Biblioteca</button><button disabled={!totalDue} onClick={() => startStudy()}>Repasar <b>{totalDue}</b></button></nav>
         <div className="avatar">C</div>
       </header>
 
@@ -146,15 +162,17 @@ function App() {
 
       {mode === 'edit' && deck && <main>
         <button className="back" onClick={goHome}>← Biblioteca</button>
-        <section className="deck-heading" style={{'--deck-color': deck.color} as React.CSSProperties}><div><p className="eyebrow">{deck.category}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div><button className="primary" disabled={!dueCards.length} onClick={() => { setStudyIndex(0); setMode('study') }}>Repasar ahora →</button></section>
+        <section className="deck-heading" style={{'--deck-color': deck.color} as React.CSSProperties}><div><p className="eyebrow">{deck.category}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div><button className="primary" disabled={!dueCards.length} onClick={() => startStudy(deck.id)}>Repasar ahora →</button></section>
         <div className="workspace">
           <form className="card-maker" onSubmit={createCard}>
             <p className="eyebrow">NUEVA TARJETA</p><h2>Crea algo memorable</h2>
             <label>Pregunta o concepto<textarea value={front} onChange={e => setFront(e.target.value)} placeholder="¿Qué quieres recordar?"/></label>
             <label>Respuesta<textarea value={back} onChange={e => setBack(e.target.value)} placeholder="La respuesta esencial..."/></label>
-            <label>Descripción<textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Añade contexto para entenderlo mejor"/></label>
-            <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
-            {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
+            <button className="enhance-toggle" type="button" onClick={() => setShowEnhancements(value => !value)}><span>✦</span><span><strong>Mejorar con IA e imagen</strong><small>Opcional</small></span><b>{showEnhancements ? '−' : '+'}</b></button>
+            {showEnhancements && <div className="enhancements"><label>Descripción<textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Añade contexto para entenderlo mejor"/></label>
+              <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
+              {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
+            </div>}
             <button className="primary wide">Guardar tarjeta</button>
           </form>
           <section className="card-list"><div className="section-title"><div><p className="eyebrow">CONTENIDO</p><h2>Tarjetas</h2></div></div>
@@ -163,19 +181,20 @@ function App() {
         </div>
       </main>}
 
-      {mode === 'study' && deck && <main className="study">
-        <button className="back" onClick={() => setMode('edit')}>← Salir del repaso</button>
-        {!dueCards.length ? <div className="complete"><span>✓</span><h1>Todo al día</h1><p>No tienes tarjetas pendientes en este mazo.</p><button className="primary" onClick={() => setMode('edit')}>Volver al mazo</button></div> : <>
-          <div className="progress"><span>{studyIndex + 1} de {dueCards.length}</span><i><b style={{width: `${((studyIndex + 1) / dueCards.length) * 100}%`}}/></i></div>
+      {mode === 'study' && studyCard && studyDeck && <main className="study">
+        <button className="back" onClick={() => setMode(activeDeck ? 'edit' : 'library')}>← Salir del repaso</button>
+        <>
+          <div className="progress"><span>{studyIndex + 1} de {studyQueue.length}</span><i><b style={{width: `${((studyIndex + 1) / studyQueue.length) * 100}%`}}/></i></div>
           <button className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
-            {dueCards[studyIndex].image && <img src={dueCards[studyIndex].image} alt=""/>}
+            <span className="study-deck" style={{background: studyDeck.color}}>{studyDeck.title}</span>
+            {studyCard.image && <img src={studyCard.image} alt=""/>}
             <p className="eyebrow">{revealed ? 'RESPUESTA' : 'PREGUNTA'}</p>
-            <h2>{revealed ? dueCards[studyIndex].back : dueCards[studyIndex].front}</h2>
-            {revealed && dueCards[studyIndex].description && <p>{dueCards[studyIndex].description}</p>}
+            <h2>{revealed ? studyCard.back : studyCard.front}</h2>
+            {revealed && studyCard.description && <p>{studyCard.description}</p>}
             {!revealed && <small><b>TOCA</b> para ver la respuesta</small>}
           </button>
           {revealed && <div className="quick-rating"><p>¿Cómo te fue?</p><div><button className="hard" onClick={() => rateCard('hard')}><span>↺</span><strong>Difícil</strong><small>Ver antes</small></button><button className="easy" onClick={() => rateCard('easy')}><strong>Fácil</strong><span>→</span><small>Siguiente</small></button></div></div>}
-        </>}
+        </>
       </main>}
     </div>
   )
