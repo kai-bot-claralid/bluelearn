@@ -22,18 +22,18 @@ type Deck = {
 }
 
 const DAY = 86_400_000
-const COLORS = ['#ff6b35', '#ffc857', '#45b69c', '#7c6ee6', '#ef5da8']
+const COLORS = ['#1769ff', '#21a8ff', '#4c6fff', '#00a6a6', '#183b66']
 
 const starterDecks: Deck[] = [
   {
-    id: 'biology', title: 'Biología celular', category: 'Ciencias', color: '#45b69c',
+    id: 'biology', title: 'Biología celular', category: 'Ciencias', color: '#1769ff',
     cards: [
       { id: 'mitochondria', front: '¿Cuál es la función de la mitocondria?', back: 'Producir ATP mediante la respiración celular.', description: 'Es el orgánulo que convierte la energía química de los nutrientes en energía utilizable por la célula.', image: 'https://upload.wikimedia.org/wikipedia/commons/1/1a/Mitochondria%2C_mammalian_lung_-_TEM.jpg', nextReview: new Date().toISOString(), interval: 0, ease: 2.5 },
       { id: 'membrane', front: '¿Qué modelo explica la membrana celular?', back: 'El modelo de mosaico fluido.', description: 'Describe una bicapa de fosfolípidos donde proteínas y otras moléculas pueden moverse lateralmente.', nextReview: new Date().toISOString(), interval: 0, ease: 2.5 },
     ],
   },
-  { id: 'english', title: 'Inglés cotidiano', category: 'Idiomas', color: '#ffc857', cards: [] },
-  { id: 'design', title: 'Fundamentos de diseño', category: 'Creatividad', color: '#ef5da8', cards: [] },
+  { id: 'english', title: 'Inglés cotidiano', category: 'Idiomas', color: '#21a8ff', cards: [] },
+  { id: 'design', title: 'Fundamentos de diseño', category: 'Creatividad', color: '#4c6fff', cards: [] },
 ]
 
 function uid() { return crypto.randomUUID() }
@@ -56,7 +56,7 @@ async function searchCommons(query: string) {
 function App() {
   const [decks, setDecks] = useState<Deck[]>(() => {
     const saved = localStorage.getItem('bluelearn-decks')
-    return saved ? JSON.parse(saved) : starterDecks
+    return saved ? JSON.parse(saved).map((item: Deck, index: number) => ({ ...item, color: COLORS[index % COLORS.length] })) : starterDecks
   })
   const [activeDeck, setActiveDeck] = useState<string | null>(null)
   const [mode, setMode] = useState<'library' | 'edit' | 'study'>('library')

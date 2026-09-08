@@ -1,6 +1,6 @@
-:root { --ink:#18201d; --cream:#f3f0e8; --paper:#fffdf7; --orange:#ff6b35; --line:#d9d5cb; }
+:root { --ink:#0b1f3a; --cream:#eef5ff; --paper:#ffffff; --orange:#1769ff; --line:#ccdaee; }
 button { border:0; background:none; cursor:pointer; }
-.app-shell { min-height:100vh; background:radial-gradient(circle at 80% 0%,rgba(255,200,87,.18),transparent 24%), var(--cream); }
+.app-shell { min-height:100vh; background:radial-gradient(circle at 80% 0%,rgba(33,168,255,.22),transparent 27%),radial-gradient(circle at 5% 55%,rgba(76,111,255,.08),transparent 22%),var(--cream); }
 header { height:76px; padding:0 clamp(20px,5vw,72px); display:flex; align-items:center; border-bottom:1px solid var(--line); gap:40px; }
 .brand { font-size:22px; font-weight:800; letter-spacing:-1px; display:flex; align-items:center; gap:9px; }
 .brand span { color:var(--orange); font-size:30px; transform:rotate(-30deg); }
