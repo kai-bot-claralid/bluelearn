@@ -283,9 +283,10 @@ function readInitialLibraryState(): { decks: Deck[]; needsOnboarding: boolean } 
   if (saved === null) return { decks: [], needsOnboarding: true }
   try {
     const parsed = JSON.parse(saved)
-    return { decks: Array.isArray(parsed) ? withColors(parsed) : starterDecks, needsOnboarding: false }
+    if (Array.isArray(parsed)) return { decks: withColors(parsed), needsOnboarding: false }
+    return { decks: [], needsOnboarding: true }
   } catch {
-    return { decks: starterDecks, needsOnboarding: false }
+    return { decks: [], needsOnboarding: true }
   }
 }
 
@@ -302,6 +303,8 @@ function App() {
   const [deckFormError, setDeckFormError] = useState<string | null>(null)
   const deckFormInitial = useRef({ title: '', category: '' })
   const deckTitleFieldRef = useRef<HTMLInputElement>(null)
+  const deckModalOpenerRef = useRef<HTMLElement | null>(null)
+  const wasDeckModalOpen = useRef(false)
 
   const [cardModal, setCardModal] = useState<CardModal | null>(null)
   const [front, setFront] = useState('')
@@ -311,14 +314,18 @@ function App() {
   const [imageResults, setImageResults] = useState<{title: string, url: string}[]>([])
   const [loadingImages, setLoadingImages] = useState(false)
   const [imageError, setImageError] = useState<string | null>(null)
+  const [imageSearchAttempted, setImageSearchAttempted] = useState(false)
   const [showEnhancements, setShowEnhancements] = useState(false)
   const [cardFormErrors, setCardFormErrors] = useState<{ front?: string; back?: string }>({})
   const [cardSaved, setCardSaved] = useState(false)
   const cardFormInitial = useRef({ front: '', back: '', description: '', image: '' })
   const frontFieldRef = useRef<HTMLTextAreaElement>(null)
   const addAnotherRef = useRef<HTMLButtonElement>(null)
+  const cardModalOpenerRef = useRef<HTMLElement | null>(null)
+  const wasCardModalOpen = useRef(false)
 
   const [revealed, setRevealed] = useState(false)
+  const flashcardRef = useRef<HTMLButtonElement>(null)
   const [studyIndex, setStudyIndex] = useState(0)
   const [studyQueue, setStudyQueue] = useState<StudyItem[]>([])
   const [sessionAnswers, setSessionAnswers] = useState<SessionAnswer[]>([])
@@ -395,6 +402,19 @@ function App() {
   useEffect(() => { if (cardModal && !cardSaved) frontFieldRef.current?.focus() }, [cardModal, cardSaved])
   useEffect(() => { if (cardSaved) addAnotherRef.current?.focus() }, [cardSaved])
 
+  useEffect(() => {
+    if (wasDeckModalOpen.current && !deckModal) deckModalOpenerRef.current?.focus()
+    wasDeckModalOpen.current = deckModal !== null
+  }, [deckModal])
+  useEffect(() => {
+    if (wasCardModalOpen.current && !cardModal) cardModalOpenerRef.current?.focus()
+    wasCardModalOpen.current = cardModal !== null
+  }, [cardModal])
+
+  useEffect(() => {
+    if (mode === 'study' && !revealed) flashcardRef.current?.focus()
+  }, [mode, studyIndex, revealed])
+
   function confirmDiscardChanges() {
     if (isDeckFormDirty && !window.confirm('Tienes cambios sin guardar en el mazo. ¿Quieres descartarlos?')) return false
     if (isCardFormDirty && !window.confirm('Tienes cambios sin guardar en la tarjeta. ¿Quieres descartarlos?')) return false
@@ -402,12 +422,14 @@ function App() {
   }
 
   function openCreateDeck() {
+    deckModalOpenerRef.current = document.activeElement as HTMLElement
     deckFormInitial.current = { title: '', category: '' }
     setDeckTitle(''); setDeckCategory(''); setDeckFormError(null)
     setDeckModal({ type: 'create' })
   }
 
   function openEditDeck(target: Deck) {
+    deckModalOpenerRef.current = document.activeElement as HTMLElement
     deckFormInitial.current = { title: target.title, category: target.category }
     setDeckTitle(target.title); setDeckCategory(target.category); setDeckFormError(null)
     setDeckModal({ type: 'edit', deckId: target.id })
@@ -447,24 +469,26 @@ function App() {
   }
 
   function openCreateCard() {
+    cardModalOpenerRef.current = document.activeElement as HTMLElement
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false); setImageError(null)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null); setImageSearchAttempted(false)
     setCardModal({ type: 'create' })
   }
 
   function openEditCard(card: Card) {
+    cardModalOpenerRef.current = document.activeElement as HTMLElement
     cardFormInitial.current = { front: card.front, back: card.back, description: card.description, image: card.image ?? '' }
     setFront(card.front); setBack(card.back); setDescription(card.description); setSelectedImage(card.image ?? '')
     setImageResults([]); setShowEnhancements(!!(card.description || card.image))
-    setCardFormErrors({}); setCardSaved(false); setImageError(null)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null); setImageSearchAttempted(false)
     setCardModal({ type: 'edit', cardId: card.id })
   }
 
   function resetCardForm() {
     setCardModal(null)
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false); setImageError(null)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null); setImageSearchAttempted(false)
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
   }
 
@@ -476,7 +500,7 @@ function App() {
   function addAnotherCard() {
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false); setImageError(null)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null); setImageSearchAttempted(false)
   }
 
   function studyAfterCardSaved() {
@@ -526,6 +550,7 @@ function App() {
     if (!query) return
     setLoadingImages(true)
     setImageError(null)
+    setImageSearchAttempted(true)
     try { setImageResults(await searchCommons(query)) }
     catch { setImageResults([]); setImageError('No pudimos buscar imágenes ahora mismo. Revisa tu conexión e inténtalo de nuevo.') }
     finally { setLoadingImages(false) }
@@ -814,7 +839,7 @@ function App() {
         <button className="back" onClick={exitStudy}>← Salir del repaso</button>
         <>
           <div className="progress"><span>{studyIndex + 1} de {studyQueue.length}</span><i><b style={{width: `${((studyIndex + 1) / studyQueue.length) * 100}%`}}/></i></div>
-          <button className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
+          <button ref={flashcardRef} className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
             <span className="study-deck" style={{background: studyDeck.color}}>{studyDeck.title}</span>
             {studyCard.image && <img src={studyCard.image} alt=""/>}
             <p className="eyebrow">{revealed ? 'RESPUESTA' : 'PREGUNTA'}</p>
@@ -934,6 +959,9 @@ function App() {
               </label>
               <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
               {imageError && <div className="image-search-error" role="alert"><span>⚠ {imageError}</span><button type="button" onClick={findImages}>Reintentar</button></div>}
+              {!loadingImages && !imageError && imageSearchAttempted && imageResults.length === 0 && (
+                <p className="image-search-empty" role="status">No encontramos imágenes libres para «{front || back}». Prueba con otras palabras.</p>
+              )}
               {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
             </div>}
             <button className="primary wide">{cardModal.type === 'edit' ? 'Guardar cambios' : 'Guardar tarjeta'}</button>
