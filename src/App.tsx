@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 
 type Card = {
@@ -25,6 +25,8 @@ type StudyItem = { deckId: string; cardId: string }
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type ImportStrategy = 'merge' | 'replace'
 type SessionAnswer = { cardId: string; deckId: string; front: string; rating: Rating; nextReview: string }
+type DeckModal = { type: 'create' } | { type: 'edit'; deckId: string }
+type CardModal = { type: 'create' } | { type: 'edit'; cardId: string }
 
 const DAY = 86_400_000
 const COLORS = ['#1769ff', '#ff6b5f', '#f4b942', '#24a47f', '#8b5cf6']
@@ -161,6 +163,25 @@ async function searchCommons(query: string) {
   })).filter((item: { url?: string }) => item.url)
 }
 
+function ModalSheet({ labelledBy, onClose, children }: { labelledBy: string; onClose: () => void; children: ReactNode }) {
+  useEffect(() => {
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+      <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby={labelledBy}>
+        <button type="button" className="close" aria-label="Cerrar" onClick={onClose}>✕</button>
+        {children}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [decks, setDecks] = useState<Deck[]>(() => {
     try {
@@ -172,11 +193,15 @@ function App() {
   })
   const [activeDeck, setActiveDeck] = useState<string | null>(null)
   const [mode, setMode] = useState<'library' | 'edit' | 'study' | 'complete'>('library')
-  const [showDeckForm, setShowDeckForm] = useState(false)
-  const [editingDeckId, setEditingDeckId] = useState<string | null>(null)
-  const [editingCardId, setEditingCardId] = useState<string | null>(null)
+
+  const [deckModal, setDeckModal] = useState<DeckModal | null>(null)
   const [deckTitle, setDeckTitle] = useState('')
   const [deckCategory, setDeckCategory] = useState('')
+  const [deckFormError, setDeckFormError] = useState<string | null>(null)
+  const deckFormInitial = useRef({ title: '', category: '' })
+  const deckTitleFieldRef = useRef<HTMLInputElement>(null)
+
+  const [cardModal, setCardModal] = useState<CardModal | null>(null)
   const [front, setFront] = useState('')
   const [back, setBack] = useState('')
   const [description, setDescription] = useState('')
@@ -184,6 +209,12 @@ function App() {
   const [imageResults, setImageResults] = useState<{title: string, url: string}[]>([])
   const [loadingImages, setLoadingImages] = useState(false)
   const [showEnhancements, setShowEnhancements] = useState(false)
+  const [cardFormErrors, setCardFormErrors] = useState<{ front?: string; back?: string }>({})
+  const [cardSaved, setCardSaved] = useState(false)
+  const cardFormInitial = useRef({ front: '', back: '', description: '', image: '' })
+  const frontFieldRef = useRef<HTMLTextAreaElement>(null)
+  const addAnotherRef = useRef<HTMLButtonElement>(null)
+
   const [revealed, setRevealed] = useState(false)
   const [studyIndex, setStudyIndex] = useState(0)
   const [studyQueue, setStudyQueue] = useState<StudyItem[]>([])
@@ -210,6 +241,14 @@ function App() {
   const studyDeck = decks.find(item => item.id === studyItem?.deckId)
   const studyCard = studyDeck?.cards.find(card => card.id === studyItem?.cardId)
 
+  const isDeckFormDirty = deckModal !== null && (deckTitle.trim() !== deckFormInitial.current.title.trim() || deckCategory.trim() !== deckFormInitial.current.category.trim())
+  const isCardFormDirty = cardModal !== null && !cardSaved && (
+    front.trim() !== cardFormInitial.current.front.trim() ||
+    back.trim() !== cardFormInitial.current.back.trim() ||
+    description.trim() !== cardFormInitial.current.description.trim() ||
+    selectedImage !== cardFormInitial.current.image
+  )
+
   const sessionSummary = useMemo(() => {
     const lastByCard = new Map<string, SessionAnswer>()
     for (const answer of sessionAnswers) lastByCard.set(answer.cardId, answer)
@@ -222,66 +261,143 @@ function App() {
     return { uniqueCards: finalAnswers.length, totalAnswers: sessionAnswers.length, distribution, reinforcement, earliestNext }
   }, [sessionAnswers])
 
-  function createDeck(event: FormEvent) {
+  useEffect(() => {
+    const dirty = isDeckFormDirty || isCardFormDirty
+    if (!dirty) return
+    function handleBeforeUnload(event: BeforeUnloadEvent) { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [isDeckFormDirty, isCardFormDirty])
+
+  useEffect(() => {
+    const open = deckModal !== null || cardModal !== null
+    document.body.style.overflow = open ? 'hidden' : ''
+    return () => { document.body.style.overflow = '' }
+  }, [deckModal, cardModal])
+
+  useEffect(() => { if (deckModal) deckTitleFieldRef.current?.focus() }, [deckModal])
+  useEffect(() => { if (cardModal && !cardSaved) frontFieldRef.current?.focus() }, [cardModal, cardSaved])
+  useEffect(() => { if (cardSaved) addAnotherRef.current?.focus() }, [cardSaved])
+
+  function confirmDiscardChanges() {
+    if (isDeckFormDirty && !window.confirm('Tienes cambios sin guardar en el mazo. ¿Quieres descartarlos?')) return false
+    if (isCardFormDirty && !window.confirm('Tienes cambios sin guardar en la tarjeta. ¿Quieres descartarlos?')) return false
+    return true
+  }
+
+  function openCreateDeck() {
+    deckFormInitial.current = { title: '', category: '' }
+    setDeckTitle(''); setDeckCategory(''); setDeckFormError(null)
+    setDeckModal({ type: 'create' })
+  }
+
+  function openEditDeck(target: Deck) {
+    deckFormInitial.current = { title: target.title, category: target.category }
+    setDeckTitle(target.title); setDeckCategory(target.category); setDeckFormError(null)
+    setDeckModal({ type: 'edit', deckId: target.id })
+  }
+
+  function resetDeckForm() {
+    setDeckModal(null); setDeckTitle(''); setDeckCategory(''); setDeckFormError(null)
+    deckFormInitial.current = { title: '', category: '' }
+  }
+
+  function requestCloseDeckModal() {
+    if (isDeckFormDirty && !window.confirm('Tienes cambios sin guardar en el mazo. ¿Quieres descartarlos?')) return
+    resetDeckForm()
+  }
+
+  function submitDeckForm(event: FormEvent) {
     event.preventDefault()
-    if (!deckTitle.trim()) return
-    const fresh: Deck = { id: uid(), title: deckTitle.trim(), category: deckCategory.trim() || 'General', color: COLORS[decks.length % COLORS.length], cards: [] }
-    setDecks(current => [...current, fresh])
-    setDeckTitle(''); setDeckCategory(''); setShowDeckForm(false); setActiveDeck(fresh.id); setMode('edit')
-  }
-
-  function startEditDeck(target: Deck) {
-    setEditingDeckId(target.id); setDeckTitle(target.title); setDeckCategory(target.category)
-  }
-
-  function cancelDeckEdit() {
-    setEditingDeckId(null); setDeckTitle(''); setDeckCategory('')
-  }
-
-  function saveDeckEdit(event: FormEvent) {
-    event.preventDefault()
-    if (!editingDeckId || !deckTitle.trim()) return
-    setDecks(current => current.map(item => item.id === editingDeckId ? { ...item, title: deckTitle.trim(), category: deckCategory.trim() || 'General' } : item))
-    cancelDeckEdit()
+    const title = deckTitle.trim()
+    if (!title) { setDeckFormError('Ponle un nombre al mazo para continuar.'); deckTitleFieldRef.current?.focus(); return }
+    if (deckModal?.type === 'edit') {
+      const id = deckModal.deckId
+      setDecks(current => current.map(item => item.id === id ? { ...item, title, category: deckCategory.trim() || 'General' } : item))
+      resetDeckForm()
+    } else {
+      const fresh: Deck = { id: uid(), title, category: deckCategory.trim() || 'General', color: COLORS[decks.length % COLORS.length], cards: [] }
+      setDecks(current => [...current, fresh])
+      resetDeckForm()
+      setActiveDeck(fresh.id); setMode('edit')
+    }
   }
 
   function handleDeleteDeck(target: Deck) {
     if (!window.confirm(`¿Eliminar el mazo "${target.title}" y sus ${target.cards.length} tarjetas? Esta acción no se puede deshacer.`)) return
     setDecks(current => current.filter(item => item.id !== target.id))
+    if (deckModal?.type === 'edit' && deckModal.deckId === target.id) resetDeckForm()
     if (activeDeck === target.id) goHome()
   }
 
-  function startEditCard(card: Card) {
-    setEditingCardId(card.id)
+  function openCreateCard() {
+    cardFormInitial.current = { front: '', back: '', description: '', image: '' }
+    setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
+    setCardFormErrors({}); setCardSaved(false)
+    setCardModal({ type: 'create' })
+  }
+
+  function openEditCard(card: Card) {
+    cardFormInitial.current = { front: card.front, back: card.back, description: card.description, image: card.image ?? '' }
     setFront(card.front); setBack(card.back); setDescription(card.description); setSelectedImage(card.image ?? '')
     setImageResults([]); setShowEnhancements(!!(card.description || card.image))
+    setCardFormErrors({}); setCardSaved(false)
+    setCardModal({ type: 'edit', cardId: card.id })
   }
 
-  function cancelCardEdit() {
-    setEditingCardId(null)
+  function resetCardForm() {
+    setCardModal(null)
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
+    setCardFormErrors({}); setCardSaved(false)
+    cardFormInitial.current = { front: '', back: '', description: '', image: '' }
   }
 
-  function createCard(event: FormEvent) {
+  function requestCloseCardModal() {
+    if (isCardFormDirty && !window.confirm('Tienes cambios sin guardar en la tarjeta. ¿Quieres descartarlos?')) return
+    resetCardForm()
+  }
+
+  function addAnotherCard() {
+    cardFormInitial.current = { front: '', back: '', description: '', image: '' }
+    setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
+    setCardFormErrors({}); setCardSaved(false)
+  }
+
+  function studyAfterCardSaved() {
+    if (!deck) return
+    const deckId = deck.id
+    resetCardForm()
+    startStudy(deckId)
+  }
+
+  function submitCardForm(event: FormEvent) {
     event.preventDefault()
-    if (!deck || !front.trim() || !back.trim()) return
-    if (editingCardId) {
-      const cardId = editingCardId
+    if (!deck || !cardModal) return
+    const errors: { front?: string; back?: string } = {}
+    if (!front.trim()) errors.front = 'Escribe la pregunta o concepto que quieres recordar.'
+    if (!back.trim()) errors.back = 'Escribe la respuesta de la tarjeta.'
+    if (errors.front || errors.back) { setCardFormErrors(errors); return }
+    if (cardModal.type === 'edit') {
+      const cardId = cardModal.cardId
       setDecks(current => current.map(item => item.id === deck.id
         ? { ...item, cards: item.cards.map(candidate => candidate.id === cardId ? { ...candidate, front: front.trim(), back: back.trim(), description: description.trim(), image: selectedImage || undefined } : candidate) }
         : item))
+      resetCardForm()
     } else {
       const card: Card = { id: uid(), front: front.trim(), back: back.trim(), description: description.trim(), image: selectedImage || undefined, nextReview: today(), interval: 0, ease: 2.5 }
       setDecks(current => current.map(item => item.id === deck.id ? { ...item, cards: [...item.cards, card] } : item))
+      setNow(Date.now())
+      cardFormInitial.current = { front: front.trim(), back: back.trim(), description: description.trim(), image: selectedImage }
+      setFront(front.trim()); setBack(back.trim()); setCardFormErrors({})
+      setCardSaved(true)
     }
-    cancelCardEdit()
   }
 
   function handleDeleteCard(card: Card) {
     if (!deck) return
     if (!window.confirm(`¿Eliminar la tarjeta "${card.front}"? Esta acción no se puede deshacer.`)) return
     setDecks(current => current.map(item => item.id === deck.id ? { ...item, cards: item.cards.filter(candidate => candidate.id !== card.id) } : item))
-    if (editingCardId === card.id) cancelCardEdit()
+    if (cardModal?.type === 'edit' && cardModal.cardId === card.id) resetCardForm()
   }
 
   function writeDescription() {
@@ -304,6 +420,7 @@ function App() {
   }
 
   function startStudy(deckId?: string) {
+    if (!confirmDiscardChanges()) return
     if (!confirmLeaveStudy()) return
     const queue = decks.flatMap(item => item.cards
       .filter(card => (!deckId || item.id === deckId) && new Date(card.nextReview) <= new Date())
@@ -358,7 +475,9 @@ function App() {
   function backToLibrary() { setSessionAnswers([]); setActiveDeck(null); setMode('library') }
 
   function goHome() {
+    if (!confirmDiscardChanges()) return
     if (!confirmLeaveStudy()) return
+    resetDeckForm(); resetCardForm()
     setMode('library'); setActiveDeck(null); setStudyQueue([]); setRevealed(false); setSessionAnswers([])
   }
 
@@ -426,6 +545,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <div inert={deckModal || cardModal ? true : undefined} aria-hidden={deckModal || cardModal ? 'true' : undefined}>
       <header>
         <button className="brand" onClick={goHome}><span>◒</span> Bluelearn</button>
         <nav><button className={mode === 'library' ? 'active' : ''} onClick={goHome}>Biblioteca</button><button disabled={!totalDue} onClick={() => startStudy()}>Repasar <b>{totalDue}</b></button></nav>
@@ -455,8 +575,7 @@ function App() {
           </div>
         </div>}
 
-        <div className="section-title"><div><p className="eyebrow">COLECCIONES</p><h2>Tus mazos</h2></div><button className="primary" onClick={() => setShowDeckForm(true)}>＋ Nuevo mazo</button></div>
-        {showDeckForm && <form className="deck-form" onSubmit={createDeck}><input autoFocus placeholder="Nombre del mazo" value={deckTitle} onChange={e => setDeckTitle(e.target.value)}/><input placeholder="Categoría o temática" value={deckCategory} onChange={e => setDeckCategory(e.target.value)}/><button className="primary">Crear</button><button type="button" onClick={() => setShowDeckForm(false)}>Cancelar</button></form>}
+        <div className="section-title"><div><p className="eyebrow">COLECCIONES</p><h2>Tus mazos</h2></div><button className="primary" onClick={openCreateDeck}>＋ Nuevo mazo</button></div>
         <section className="deck-grid">
           {decks.map((item, index) => {
             const due = item.cards.filter(card => isDue(card.nextReview, now)).length
@@ -464,7 +583,7 @@ function App() {
               <div className="deck-top">
                 <span className="deck-number">0{index + 1}</span>
                 <div className="deck-actions">
-                  <button type="button" aria-label={`Editar ${item.title}`} title="Editar mazo" onClick={() => { setActiveDeck(item.id); setMode('edit'); startEditDeck(item) }}>✎</button>
+                  <button type="button" aria-label={`Editar ${item.title}`} title="Editar mazo" onClick={() => openEditDeck(item)}>✎</button>
                   <button type="button" aria-label={`Eliminar ${item.title}`} title="Eliminar mazo" onClick={() => handleDeleteDeck(item)}>✕</button>
                 </div>
               </div>
@@ -479,38 +598,24 @@ function App() {
       {mode === 'edit' && deck && <main>
         <button className="back" onClick={goHome}>← Biblioteca</button>
         <section className="deck-heading" style={{'--deck-color': deck.color} as React.CSSProperties}>
-          {editingDeckId === deck.id ? (
-            <form className="deck-form" onSubmit={saveDeckEdit}>
-              <input autoFocus placeholder="Nombre del mazo" value={deckTitle} onChange={e => setDeckTitle(e.target.value)}/>
-              <input placeholder="Categoría o temática" value={deckCategory} onChange={e => setDeckCategory(e.target.value)}/>
-              <button className="primary">Guardar</button><button type="button" onClick={cancelDeckEdit}>Cancelar</button>
-            </form>
-          ) : (
-            <div><p className="eyebrow">{deck.category}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div>
-          )}
+          <div><p className="eyebrow">{deck.category}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div>
           <div className="deck-heading-actions">
-            {editingDeckId !== deck.id && <button type="button" className="ghost" onClick={() => startEditDeck(deck)}>✎ Editar mazo</button>}
+            <button type="button" className="ghost" onClick={() => openEditDeck(deck)}>✎ Editar mazo</button>
             <button type="button" className="ghost danger" onClick={() => handleDeleteDeck(deck)}>✕ Eliminar mazo</button>
             <button className="primary" disabled={!dueCards.length} onClick={() => startStudy(deck.id)}>Repasar ahora →</button>
           </div>
         </section>
-        <div className="workspace">
-          <form className="card-maker" onSubmit={createCard}>
-            <p className="eyebrow">{editingCardId ? 'EDITAR TARJETA' : 'NUEVA TARJETA'}</p><h2>{editingCardId ? 'Actualiza esta tarjeta' : 'Crea algo memorable'}</h2>
-            <label>Pregunta o concepto<textarea value={front} onChange={e => setFront(e.target.value)} placeholder="¿Qué quieres recordar?"/></label>
-            <label>Respuesta<textarea value={back} onChange={e => setBack(e.target.value)} placeholder="La respuesta esencial..."/></label>
-            <button className="enhance-toggle" type="button" onClick={() => setShowEnhancements(value => !value)}><span>✦</span><span><strong>Mejorar con IA e imagen</strong><small>Opcional</small></span><b>{showEnhancements ? '−' : '+'}</b></button>
-            {showEnhancements && <div className="enhancements"><label>Descripción<textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Añade contexto para entenderlo mejor"/></label>
-              <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
-              {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
-            </div>}
-            <button className="primary wide">{editingCardId ? 'Guardar cambios' : 'Guardar tarjeta'}</button>
-            {editingCardId && <button type="button" className="wide-cancel" onClick={cancelCardEdit}>Cancelar edición</button>}
-          </form>
-          <section className="card-list"><div className="section-title"><div><p className="eyebrow">CONTENIDO</p><h2>Tarjetas</h2></div></div>
-            {deck.cards.length === 0 ? <div className="empty">Tu primera tarjeta aparecerá aquí.</div> : deck.cards.map(card => <article className="mini-card" key={card.id}>{card.image && <img src={card.image} alt=""/>}<div><strong>{card.front}</strong><p>{card.back}</p></div><span>{dueLabel(card.nextReview)}</span><div className="mini-card-actions"><button type="button" aria-label={`Editar ${card.front}`} title="Editar tarjeta" onClick={() => startEditCard(card)}>✎</button><button type="button" aria-label={`Eliminar ${card.front}`} title="Eliminar tarjeta" onClick={() => handleDeleteCard(card)}>✕</button></div></article>)}
-          </section>
-        </div>
+        <section className="card-list">
+          <div className="section-title"><div><p className="eyebrow">CONTENIDO</p><h2>Tarjetas</h2></div><button type="button" className="primary" onClick={openCreateCard}>＋ Añadir tarjeta</button></div>
+          {deck.cards.length === 0 ? (
+            <div className="empty-state">
+              <span>✦</span>
+              <h3>Este mazo está listo para su primera tarjeta</h3>
+              <p>Añade una pregunta y su respuesta para empezar a repasar «{deck.title}».</p>
+              <button type="button" className="primary" onClick={openCreateCard}>＋ Añadir tu primera tarjeta</button>
+            </div>
+          ) : deck.cards.map(card => <article className="mini-card" key={card.id}>{card.image && <img src={card.image} alt=""/>}<div><strong>{card.front}</strong><p>{card.back}</p></div><span>{dueLabel(card.nextReview)}</span><div className="mini-card-actions"><button type="button" aria-label={`Editar ${card.front}`} title="Editar tarjeta" onClick={() => openEditCard(card)}>✎</button><button type="button" aria-label={`Eliminar ${card.front}`} title="Eliminar tarjeta" onClick={() => handleDeleteCard(card)}>✕</button></div></article>)}
+        </section>
       </main>}
 
       {mode === 'study' && studyCard && studyDeck && <main className="study">
@@ -562,6 +667,87 @@ function App() {
           </div>
         </div>
       </main>}
+      </div>
+
+      {deckModal && <ModalSheet labelledBy="deck-modal-title" onClose={requestCloseDeckModal}>
+        <form className="card-maker" onSubmit={submitDeckForm} noValidate>
+          <p className="eyebrow">{deckModal.type === 'edit' ? 'EDITAR MAZO' : 'NUEVO MAZO'}</p>
+          <h2 id="deck-modal-title">{deckModal.type === 'edit' ? 'Actualiza este mazo' : 'Empieza un mazo nuevo'}</h2>
+          <label>Nombre del mazo
+            <input
+              ref={deckTitleFieldRef}
+              value={deckTitle}
+              onChange={e => { setDeckTitle(e.target.value); if (deckFormError) setDeckFormError(null) }}
+              placeholder="Ej. Vocabulario de francés"
+              aria-required="true"
+              aria-invalid={deckFormError ? 'true' : 'false'}
+              aria-describedby={deckFormError ? 'deck-title-error' : undefined}
+            />
+            {deckFormError && <span className="field-error" id="deck-title-error" role="alert">{deckFormError}</span>}
+          </label>
+          <label>Categoría o temática
+            <input value={deckCategory} onChange={e => setDeckCategory(e.target.value)} placeholder="Ej. Idiomas"/>
+            <span className="field-help">Opcional — ayuda a organizar tus mazos por tema.</span>
+          </label>
+          <button className="primary wide">{deckModal.type === 'edit' ? 'Guardar cambios' : 'Crear mazo'}</button>
+          <button type="button" className="wide-cancel" onClick={requestCloseDeckModal}>Cancelar</button>
+        </form>
+      </ModalSheet>}
+
+      {cardModal && deck && <ModalSheet labelledBy="card-modal-title" onClose={requestCloseCardModal}>
+        {cardSaved ? (
+          <div className="form-success" role="status" aria-live="polite">
+            <span className="success-icon">✓</span>
+            <h2 id="card-modal-title">Tarjeta añadida</h2>
+            <p>Se guardó en «{deck.title}».</p>
+            <div className="saved-card"><strong>{front}</strong><p>{back}</p></div>
+            <div className="success-actions">
+              <button type="button" className="primary" ref={addAnotherRef} onClick={addAnotherCard}>＋ Añadir otra</button>
+              {dueCards.length > 0 && <button type="button" className="ghost" onClick={studyAfterCardSaved}>Comenzar a estudiar →</button>}
+            </div>
+            <button type="button" className="wide-cancel" onClick={resetCardForm}>Listo, volver al mazo</button>
+          </div>
+        ) : (
+          <form className="card-maker" onSubmit={submitCardForm} noValidate>
+            <p className="eyebrow">{cardModal.type === 'edit' ? 'EDITAR TARJETA' : 'NUEVA TARJETA'}</p>
+            <h2 id="card-modal-title">{cardModal.type === 'edit' ? 'Actualiza esta tarjeta' : 'Crea algo memorable'}</h2>
+            <label>Pregunta o concepto
+              <textarea
+                ref={frontFieldRef}
+                value={front}
+                onChange={e => { setFront(e.target.value); if (cardFormErrors.front) setCardFormErrors(errs => ({ ...errs, front: undefined })) }}
+                placeholder="¿Qué quieres recordar?"
+                aria-required="true"
+                aria-invalid={cardFormErrors.front ? 'true' : 'false'}
+                aria-describedby={cardFormErrors.front ? 'card-front-error' : undefined}
+              />
+              {cardFormErrors.front && <span className="field-error" id="card-front-error" role="alert">{cardFormErrors.front}</span>}
+            </label>
+            <label>Respuesta
+              <textarea
+                value={back}
+                onChange={e => { setBack(e.target.value); if (cardFormErrors.back) setCardFormErrors(errs => ({ ...errs, back: undefined })) }}
+                placeholder="La respuesta esencial..."
+                aria-required="true"
+                aria-invalid={cardFormErrors.back ? 'true' : 'false'}
+                aria-describedby={cardFormErrors.back ? 'card-back-error' : undefined}
+              />
+              {cardFormErrors.back && <span className="field-error" id="card-back-error" role="alert">{cardFormErrors.back}</span>}
+            </label>
+            <button className="enhance-toggle" type="button" onClick={() => setShowEnhancements(value => !value)}><span>✦</span><span><strong>Mejorar con IA e imagen</strong><small>Opcional</small></span><b>{showEnhancements ? '−' : '+'}</b></button>
+            {showEnhancements && <div className="enhancements">
+              <label>Descripción
+                <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Añade contexto para entenderlo mejor"/>
+                <span className="field-help">Opcional — se muestra junto a la respuesta al estudiar.</span>
+              </label>
+              <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
+              {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
+            </div>}
+            <button className="primary wide">{cardModal.type === 'edit' ? 'Guardar cambios' : 'Guardar tarjeta'}</button>
+            <button type="button" className="wide-cancel" onClick={requestCloseCardModal}>Cancelar</button>
+          </form>
+        )}
+      </ModalSheet>}
     </div>
   )
 }
