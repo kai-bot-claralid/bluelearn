@@ -19,6 +19,7 @@ type Deck = {
   category: string
   color: string
   cards: Card[]
+  isDemo?: boolean
 }
 
 type StudyItem = { deckId: string; cardId: string }
@@ -43,17 +44,18 @@ const RATING_META: Record<Rating, { label: string; icon: string }> = {
 const SESSION_RETRY_LIMIT = 2
 const RETRY_GAP = 3
 const DUE_REFRESH_MS = 20_000
+const DECKS_KEY = 'bluelearn-decks'
 
 const starterDecks: Deck[] = [
   {
-    id: 'biology', title: 'Biología celular', category: 'Ciencias', color: '#24a47f',
+    id: 'biology', title: 'Biología celular', category: 'Ciencias', color: '#24a47f', isDemo: true,
     cards: [
       { id: 'mitochondria', front: '¿Cuál es la función de la mitocondria?', back: 'Producir ATP mediante la respiración celular.', description: 'Es el orgánulo que convierte la energía química de los nutrientes en energía utilizable por la célula.', image: 'https://upload.wikimedia.org/wikipedia/commons/1/1a/Mitochondria%2C_mammalian_lung_-_TEM.jpg', nextReview: new Date().toISOString(), interval: 0, ease: 2.5 },
       { id: 'membrane', front: '¿Qué modelo explica la membrana celular?', back: 'El modelo de mosaico fluido.', description: 'Describe una bicapa de fosfolípidos donde proteínas y otras moléculas pueden moverse lateralmente.', nextReview: new Date().toISOString(), interval: 0, ease: 2.5 },
     ],
   },
-  { id: 'english', title: 'Inglés cotidiano', category: 'Idiomas', color: '#f4b942', cards: [] },
-  { id: 'design', title: 'Fundamentos de diseño', category: 'Creatividad', color: '#ff6b5f', cards: [] },
+  { id: 'english', title: 'Inglés cotidiano', category: 'Idiomas', color: '#f4b942', isDemo: true, cards: [] },
+  { id: 'design', title: 'Fundamentos de diseño', category: 'Creatividad', color: '#ff6b5f', isDemo: true, cards: [] },
 ]
 
 function uid() { return crypto.randomUUID() }
@@ -131,6 +133,7 @@ function validateBackup(data: unknown): { ok: true; decks: Deck[] } | { ok: fals
       category: typeof category === 'string' && category.trim() ? category : 'General',
       color: COLORS[0],
       cards: validCards,
+      isDemo: typeof rawDeck.isDemo === 'boolean' ? rawDeck.isDemo : undefined,
     })
   }
   return { ok: true, decks }
@@ -182,17 +185,116 @@ function ModalSheet({ labelledBy, onClose, children }: { labelledBy: string; onC
   )
 }
 
+type ActionMenuItem = { label: string; onSelect: () => void; danger?: boolean }
+
+function ActionMenu({
+  id, isOpen, onToggle, onClose, label, items, note, align = 'end', triggerContent, triggerClassName,
+}: {
+  id: string
+  isOpen: boolean
+  onToggle: () => void
+  onClose: () => void
+  label: string
+  items: ActionMenuItem[]
+  note?: string
+  align?: 'start' | 'end'
+  triggerContent?: ReactNode
+  triggerClassName?: string
+}) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    function handlePointer(event: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) onClose()
+    }
+    function handleKey(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      onClose()
+      buttonRef.current?.focus()
+    }
+    document.addEventListener('mousedown', handlePointer)
+    window.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handlePointer)
+      window.removeEventListener('keydown', handleKey)
+    }
+  }, [isOpen, onClose])
+
+  useEffect(() => {
+    if (isOpen) (listRef.current?.querySelector('[role="menuitem"]') as HTMLElement | null)?.focus()
+  }, [isOpen])
+
+  function handleListKeyDown(event: React.KeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    event.preventDefault()
+    const menuItems = [...(listRef.current?.querySelectorAll('[role="menuitem"]') ?? [])] as HTMLElement[]
+    if (!menuItems.length) return
+    const currentIndex = menuItems.indexOf(document.activeElement as HTMLElement)
+    const delta = event.key === 'ArrowDown' ? 1 : -1
+    const nextIndex = (currentIndex + delta + menuItems.length) % menuItems.length
+    menuItems[nextIndex]?.focus()
+  }
+
+  return (
+    <div className="action-menu" ref={rootRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        className={`action-menu-trigger ${triggerClassName ?? ''}`}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-controls={isOpen ? id : undefined}
+        aria-label={label}
+        onClick={event => { event.stopPropagation(); onToggle() }}
+      >{triggerContent ?? '⋯'}</button>
+      {isOpen && (
+        <div
+          className={`action-menu-list align-${align}`}
+          id={id}
+          role="menu"
+          aria-label={label}
+          ref={listRef}
+          onMouseDown={event => event.stopPropagation()}
+          onKeyDown={handleListKeyDown}
+        >
+          {note && <p className="action-menu-note">{note}</p>}
+          {items.map(item => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              className={item.danger ? 'danger' : ''}
+              onClick={event => { event.stopPropagation(); onClose(); item.onSelect() }}
+            >{item.label}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function readInitialLibraryState(): { decks: Deck[]; needsOnboarding: boolean } {
+  let saved: string | null
+  try { saved = localStorage.getItem(DECKS_KEY) } catch { saved = null }
+  if (saved === null) return { decks: [], needsOnboarding: true }
+  try {
+    const parsed = JSON.parse(saved)
+    return { decks: Array.isArray(parsed) ? withColors(parsed) : starterDecks, needsOnboarding: false }
+  } catch {
+    return { decks: starterDecks, needsOnboarding: false }
+  }
+}
+
 function App() {
-  const [decks, setDecks] = useState<Deck[]>(() => {
-    try {
-      const saved = localStorage.getItem('bluelearn-decks')
-      if (!saved) return starterDecks
-      const parsed = JSON.parse(saved)
-      return Array.isArray(parsed) ? withColors(parsed) : starterDecks
-    } catch { return starterDecks }
-  })
+  const [decks, setDecks] = useState<Deck[]>(() => readInitialLibraryState().decks)
+  const [needsOnboarding, setNeedsOnboarding] = useState(() => readInitialLibraryState().needsOnboarding)
   const [activeDeck, setActiveDeck] = useState<string | null>(null)
   const [mode, setMode] = useState<'library' | 'edit' | 'study' | 'complete'>('library')
+  const [openMenu, setOpenMenu] = useState<string | null>(null)
 
   const [deckModal, setDeckModal] = useState<DeckModal | null>(null)
   const [deckTitle, setDeckTitle] = useState('')
@@ -208,6 +310,7 @@ function App() {
   const [selectedImage, setSelectedImage] = useState('')
   const [imageResults, setImageResults] = useState<{title: string, url: string}[]>([])
   const [loadingImages, setLoadingImages] = useState(false)
+  const [imageError, setImageError] = useState<string | null>(null)
   const [showEnhancements, setShowEnhancements] = useState(false)
   const [cardFormErrors, setCardFormErrors] = useState<{ front?: string; back?: string }>({})
   const [cardSaved, setCardSaved] = useState(false)
@@ -226,7 +329,20 @@ function App() {
   const retryCounts = useRef<Map<string, number>>(new Map())
   const [now, setNow] = useState(() => Date.now())
 
-  useEffect(() => localStorage.setItem('bluelearn-decks', JSON.stringify(decks)), [decks])
+  useEffect(() => {
+    if (needsOnboarding) return
+    localStorage.setItem(DECKS_KEY, JSON.stringify(decks))
+  }, [decks, needsOnboarding])
+
+  useEffect(() => { setOpenMenu(null) }, [mode, activeDeck, deckModal, cardModal])
+
+  function toggleMenu(id: string) { setOpenMenu(current => current === id ? null : id) }
+  function closeMenu() { setOpenMenu(null) }
+
+  function chooseOnboarding(choice: 'sample' | 'empty') {
+    setDecks(choice === 'sample' ? starterDecks : [])
+    setNeedsOnboarding(false)
+  }
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), DUE_REFRESH_MS)
@@ -333,7 +449,7 @@ function App() {
   function openCreateCard() {
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null)
     setCardModal({ type: 'create' })
   }
 
@@ -341,14 +457,14 @@ function App() {
     cardFormInitial.current = { front: card.front, back: card.back, description: card.description, image: card.image ?? '' }
     setFront(card.front); setBack(card.back); setDescription(card.description); setSelectedImage(card.image ?? '')
     setImageResults([]); setShowEnhancements(!!(card.description || card.image))
-    setCardFormErrors({}); setCardSaved(false)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null)
     setCardModal({ type: 'edit', cardId: card.id })
   }
 
   function resetCardForm() {
     setCardModal(null)
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null)
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
   }
 
@@ -360,7 +476,7 @@ function App() {
   function addAnotherCard() {
     cardFormInitial.current = { front: '', back: '', description: '', image: '' }
     setFront(''); setBack(''); setDescription(''); setSelectedImage(''); setImageResults([]); setShowEnhancements(false)
-    setCardFormErrors({}); setCardSaved(false)
+    setCardFormErrors({}); setCardSaved(false); setImageError(null)
   }
 
   function studyAfterCardSaved() {
@@ -409,8 +525,9 @@ function App() {
     const query = front || back
     if (!query) return
     setLoadingImages(true)
+    setImageError(null)
     try { setImageResults(await searchCommons(query)) }
-    catch { setImageResults([]) }
+    catch { setImageResults([]); setImageError('No pudimos buscar imágenes ahora mismo. Revisa tu conexión e inténtalo de nuevo.') }
     finally { setLoadingImages(false) }
   }
 
@@ -515,6 +632,13 @@ function App() {
   function applyImport(strategy: ImportStrategy) {
     if (!pendingImport) return
     const incoming = pendingImport
+    if (strategy === 'replace') {
+      const incomingCards = incoming.reduce((sum, item) => sum + item.cards.length, 0)
+      const confirmed = window.confirm(
+        `Vas a reemplazar tu biblioteca actual (${decks.length} mazos, ${totalCards} tarjetas) por la del archivo (${incoming.length} mazos, ${incomingCards} tarjetas). Esta acción no se puede deshacer. ¿Confirmas el reemplazo?`
+      )
+      if (!confirmed) return
+    }
     setDecks(current => withColors(strategy === 'replace' ? incoming : mergeDecks(current, incoming)))
     setPendingImport(null)
     setImportSuccess(strategy === 'replace' ? 'Tu biblioteca fue reemplazada con el archivo importado.' : 'El archivo se combinó con tu biblioteca actual.')
@@ -543,26 +667,52 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, revealed, studyCard, studyDeck, studyIndex, studyQueue])
 
+  if (needsOnboarding) {
+    return (
+      <div className="app-shell">
+        <header><button className="brand" disabled><span>◒</span> Bluelearn</button></header>
+        <main className="onboarding">
+          <p className="eyebrow">BIENVENIDO</p>
+          <h1>Antes de<br/><em>empezar.</em></h1>
+          <p>Puedes explorar Bluelearn con mazos de ejemplo o arrancar con una biblioteca vacía. Podrás cambiarlo cuando quieras.</p>
+          <div className="onboarding-actions">
+            <button type="button" className="primary" onClick={() => chooseOnboarding('sample')}>Explorar ejemplo</button>
+            <button type="button" className="ghost" onClick={() => chooseOnboarding('empty')}>Comenzar desde cero</button>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className="app-shell">
       <div inert={deckModal || cardModal ? true : undefined} aria-hidden={deckModal || cardModal ? 'true' : undefined}>
       <header>
         <button className="brand" onClick={goHome}><span>◒</span> Bluelearn</button>
         <nav><button className={mode === 'library' ? 'active' : ''} onClick={goHome}>Biblioteca</button><button disabled={!totalDue} onClick={() => startStudy()}>Repasar <b>{totalDue}</b></button></nav>
-        <div className="avatar">C</div>
       </header>
 
       {mode === 'library' && <main>
         <section className="hero-copy"><p className="eyebrow">TU BIBLIOTECA DE APRENDIZAJE</p><h1>Aprender, recordar,<br/><em>crecer.</em></h1><p>Convierte cualquier tema en conocimiento que permanece.</p></section>
         <section className="stats"><div><strong>{decks.length}</strong><span>Mazos</span></div><div><strong>{totalCards}</strong><span>Tarjetas</span></div><div className="due"><strong>{totalDue}</strong><span>Para hoy</span></div></section>
 
-        <div className="backup-bar">
-          <span>Copia de seguridad · {decks.length} mazos, {totalCards} tarjetas</span>
-          <div>
-            <button type="button" onClick={handleExport}>⇩ Exportar backup</button>
-            <button type="button" onClick={() => fileInputRef.current?.click()}>⇧ Importar backup</button>
-            <input ref={fileInputRef} type="file" accept="application/json" hidden onChange={handleImportFile} />
-          </div>
+        <div className="library-options">
+          <ActionMenu
+            id="library-options-menu"
+            isOpen={openMenu === 'library-options'}
+            onToggle={() => toggleMenu('library-options')}
+            onClose={closeMenu}
+            label="Opciones de biblioteca"
+            align="end"
+            triggerClassName="text"
+            triggerContent={<>⚙ Opciones de biblioteca</>}
+            note={`${decks.length} mazos · ${totalCards} tarjetas`}
+            items={[
+              { label: '⇩ Exportar backup', onSelect: handleExport },
+              { label: '⇧ Importar backup', onSelect: () => fileInputRef.current?.click() },
+            ]}
+          />
+          <input ref={fileInputRef} type="file" accept="application/json" hidden onChange={handleImportFile} />
         </div>
         {importError && <div className="import-banner error" role="alert"><span>⚠ {importError}</span><button type="button" className="ack" aria-label="Cerrar aviso" onClick={() => setImportError(null)}>✕</button></div>}
         {importSuccess && <div className="import-banner success" role="status"><span>✓ {importSuccess}</span><button type="button" className="ack" aria-label="Cerrar aviso" onClick={() => setImportSuccess(null)}>✕</button></div>}
@@ -570,38 +720,62 @@ function App() {
           <span>Encontramos {pendingImport.length} mazos y {pendingImport.reduce((sum, item) => sum + item.cards.length, 0)} tarjetas en el archivo. ¿Qué quieres hacer?</span>
           <div className="import-confirm-actions">
             <button type="button" className="primary" onClick={() => applyImport('merge')}>Combinar</button>
-            <button type="button" onClick={() => applyImport('replace')}>Reemplazar todo</button>
+            <button type="button" className="danger-text" onClick={() => applyImport('replace')}>Reemplazar todo</button>
             <button type="button" onClick={() => setPendingImport(null)}>Cancelar</button>
           </div>
         </div>}
 
         <div className="section-title"><div><p className="eyebrow">COLECCIONES</p><h2>Tus mazos</h2></div><button className="primary" onClick={openCreateDeck}>＋ Nuevo mazo</button></div>
-        <section className="deck-grid">
+        {decks.length === 0 ? (
+          <div className="empty-state">
+            <span>✦</span>
+            <h3>Tu biblioteca está vacía</h3>
+            <p>Crea tu primer mazo para empezar a guardar lo que quieres aprender.</p>
+            <button type="button" className="primary" onClick={openCreateDeck}>＋ Nuevo mazo</button>
+          </div>
+        ) : <section className="deck-grid">
           {decks.map((item, index) => {
             const due = item.cards.filter(card => isDue(card.nextReview, now)).length
+            const menuId = `deck-menu-${item.id}`
             return <div className="deck" key={item.id} style={{'--deck-color': item.color} as React.CSSProperties}>
               <div className="deck-top">
                 <span className="deck-number">0{index + 1}</span>
-                <div className="deck-actions">
-                  <button type="button" aria-label={`Editar ${item.title}`} title="Editar mazo" onClick={() => openEditDeck(item)}>✎</button>
-                  <button type="button" aria-label={`Eliminar ${item.title}`} title="Eliminar mazo" onClick={() => handleDeleteDeck(item)}>✕</button>
-                </div>
+                <ActionMenu
+                  id={menuId}
+                  isOpen={openMenu === menuId}
+                  onToggle={() => toggleMenu(menuId)}
+                  onClose={closeMenu}
+                  label={`Más opciones para ${item.title}`}
+                  items={[
+                    { label: '✎ Editar mazo', onSelect: () => openEditDeck(item) },
+                    { label: '✕ Eliminar mazo', onSelect: () => handleDeleteDeck(item), danger: true },
+                  ]}
+                />
               </div>
               <button type="button" className="deck-open" onClick={() => { setActiveDeck(item.id); setMode('edit') }}>
-                <span className="category">{item.category}</span><h3>{item.title}</h3><p>{item.cards.length} tarjetas</p><span className="deck-footer">{due ? `${due} para hoy` : 'Al día'} <i>→</i></span>
+                <span className="category">{item.category}</span>{item.isDemo && <span className="demo-tag">Ejemplo</span>}<h3>{item.title}</h3><p>{item.cards.length} tarjetas</p><span className="deck-footer">{due ? `${due} para hoy` : 'Al día'} <i>→</i></span>
               </button>
             </div>
           })}
-        </section>
+        </section>}
       </main>}
 
       {mode === 'edit' && deck && <main>
         <button className="back" onClick={goHome}>← Biblioteca</button>
         <section className="deck-heading" style={{'--deck-color': deck.color} as React.CSSProperties}>
-          <div><p className="eyebrow">{deck.category}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div>
+          <div><p className="eyebrow">{deck.category}{deck.isDemo && <span className="demo-tag inline">Ejemplo</span>}</p><h1>{deck.title}</h1><p>{deck.cards.length} tarjetas · {dueCards.length} pendientes</p></div>
           <div className="deck-heading-actions">
-            <button type="button" className="ghost" onClick={() => openEditDeck(deck)}>✎ Editar mazo</button>
-            <button type="button" className="ghost danger" onClick={() => handleDeleteDeck(deck)}>✕ Eliminar mazo</button>
+            <ActionMenu
+              id="deck-heading-menu"
+              isOpen={openMenu === 'deck-heading-menu'}
+              onToggle={() => toggleMenu('deck-heading-menu')}
+              onClose={closeMenu}
+              label={`Más opciones para ${deck.title}`}
+              items={[
+                { label: '✎ Editar mazo', onSelect: () => openEditDeck(deck) },
+                { label: '✕ Eliminar mazo', onSelect: () => handleDeleteDeck(deck), danger: true },
+              ]}
+            />
             <button className="primary" disabled={!dueCards.length} onClick={() => startStudy(deck.id)}>Repasar ahora →</button>
           </div>
         </section>
@@ -614,7 +788,25 @@ function App() {
               <p>Añade una pregunta y su respuesta para empezar a repasar «{deck.title}».</p>
               <button type="button" className="primary" onClick={openCreateCard}>＋ Añadir tu primera tarjeta</button>
             </div>
-          ) : deck.cards.map(card => <article className="mini-card" key={card.id}>{card.image && <img src={card.image} alt=""/>}<div><strong>{card.front}</strong><p>{card.back}</p></div><span>{dueLabel(card.nextReview)}</span><div className="mini-card-actions"><button type="button" aria-label={`Editar ${card.front}`} title="Editar tarjeta" onClick={() => openEditCard(card)}>✎</button><button type="button" aria-label={`Eliminar ${card.front}`} title="Eliminar tarjeta" onClick={() => handleDeleteCard(card)}>✕</button></div></article>)}
+          ) : deck.cards.map(card => {
+            const menuId = `card-menu-${card.id}`
+            return <article className="mini-card" key={card.id}>
+              {card.image && <img src={card.image} alt=""/>}
+              <div><strong>{card.front}</strong><p>{card.back}</p></div>
+              <span>{dueLabel(card.nextReview)}</span>
+              <ActionMenu
+                id={menuId}
+                isOpen={openMenu === menuId}
+                onToggle={() => toggleMenu(menuId)}
+                onClose={closeMenu}
+                label={`Más opciones para ${card.front}`}
+                items={[
+                  { label: '✎ Editar tarjeta', onSelect: () => openEditCard(card) },
+                  { label: '✕ Eliminar tarjeta', onSelect: () => handleDeleteCard(card), danger: true },
+                ]}
+              />
+            </article>
+          })}
         </section>
       </main>}
 
@@ -734,13 +926,14 @@ function App() {
               />
               {cardFormErrors.back && <span className="field-error" id="card-back-error" role="alert">{cardFormErrors.back}</span>}
             </label>
-            <button className="enhance-toggle" type="button" onClick={() => setShowEnhancements(value => !value)}><span>✦</span><span><strong>Mejorar con IA e imagen</strong><small>Opcional</small></span><b>{showEnhancements ? '−' : '+'}</b></button>
+            <button className="enhance-toggle" type="button" onClick={() => setShowEnhancements(value => !value)}><span>✦</span><span><strong>Añadir contexto e imagen</strong><small>Opcional</small></span><b>{showEnhancements ? '−' : '+'}</b></button>
             {showEnhancements && <div className="enhancements">
               <label>Descripción
                 <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Añade contexto para entenderlo mejor"/>
                 <span className="field-help">Opcional — se muestra junto a la respuesta al estudiar.</span>
               </label>
               <div className="assistant-row"><button type="button" onClick={writeDescription}>✦ Sugerir descripción</button><button type="button" onClick={findImages}>{loadingImages ? 'Buscando…' : '▧ Buscar imagen libre'}</button></div>
+              {imageError && <div className="image-search-error" role="alert"><span>⚠ {imageError}</span><button type="button" onClick={findImages}>Reintentar</button></div>}
               {!!imageResults.length && <div className="image-strip">{imageResults.map(image => <button type="button" key={image.url} className={selectedImage === image.url ? 'selected' : ''} onClick={() => setSelectedImage(image.url)} title={image.title}><img src={image.url} alt={image.title}/></button>)}</div>}
             </div>}
             <button className="primary wide">{cardModal.type === 'edit' ? 'Guardar cambios' : 'Guardar tarjeta'}</button>
