@@ -24,6 +24,7 @@ type Deck = {
 type StudyItem = { deckId: string; cardId: string }
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type ImportStrategy = 'merge' | 'replace'
+type SessionAnswer = { cardId: string; deckId: string; front: string; rating: Rating; nextReview: string }
 
 const DAY = 86_400_000
 const COLORS = ['#1769ff', '#ff6b5f', '#f4b942', '#24a47f', '#8b5cf6']
@@ -36,6 +37,10 @@ const RATING_META: Record<Rating, { label: string; icon: string }> = {
   good: { label: 'Bien', icon: '✓' },
   easy: { label: 'Fácil', icon: '✦' },
 }
+// Same-session "otra vez" retries: how many extra chances a card gets, and how far back in the queue it reappears.
+const SESSION_RETRY_LIMIT = 2
+const RETRY_GAP = 3
+const DUE_REFRESH_MS = 20_000
 
 const starterDecks: Deck[] = [
   {
@@ -80,6 +85,10 @@ function formatDue(ms: number) {
 function dueLabel(nextReview: string) {
   const diff = new Date(nextReview).getTime() - Date.now()
   return diff <= 0 ? 'Hoy' : formatDue(diff)
+}
+
+function isDue(nextReview: string, now: number) {
+  return new Date(nextReview).getTime() <= now
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -162,7 +171,7 @@ function App() {
     } catch { return starterDecks }
   })
   const [activeDeck, setActiveDeck] = useState<string | null>(null)
-  const [mode, setMode] = useState<'library' | 'edit' | 'study'>('library')
+  const [mode, setMode] = useState<'library' | 'edit' | 'study' | 'complete'>('library')
   const [showDeckForm, setShowDeckForm] = useState(false)
   const [editingDeckId, setEditingDeckId] = useState<string | null>(null)
   const [editingCardId, setEditingCardId] = useState<string | null>(null)
@@ -178,20 +187,40 @@ function App() {
   const [revealed, setRevealed] = useState(false)
   const [studyIndex, setStudyIndex] = useState(0)
   const [studyQueue, setStudyQueue] = useState<StudyItem[]>([])
+  const [sessionAnswers, setSessionAnswers] = useState<SessionAnswer[]>([])
   const [importError, setImportError] = useState<string | null>(null)
   const [importSuccess, setImportSuccess] = useState<string | null>(null)
   const [pendingImport, setPendingImport] = useState<Deck[] | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const retryCounts = useRef<Map<string, number>>(new Map())
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => localStorage.setItem('bluelearn-decks', JSON.stringify(decks)), [decks])
 
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), DUE_REFRESH_MS)
+    return () => clearInterval(id)
+  }, [])
+
   const deck = decks.find(item => item.id === activeDeck)
-  const dueCards = useMemo(() => deck?.cards.filter(card => new Date(card.nextReview) <= new Date()) ?? [], [deck])
+  const dueCards = useMemo(() => deck?.cards.filter(card => isDue(card.nextReview, now)) ?? [], [deck, now])
   const totalCards = decks.reduce((sum, item) => sum + item.cards.length, 0)
-  const totalDue = decks.flatMap(item => item.cards).filter(card => new Date(card.nextReview) <= new Date()).length
+  const totalDue = useMemo(() => decks.flatMap(item => item.cards).filter(card => isDue(card.nextReview, now)).length, [decks, now])
   const studyItem = studyQueue[studyIndex]
   const studyDeck = decks.find(item => item.id === studyItem?.deckId)
   const studyCard = studyDeck?.cards.find(card => card.id === studyItem?.cardId)
+
+  const sessionSummary = useMemo(() => {
+    const lastByCard = new Map<string, SessionAnswer>()
+    for (const answer of sessionAnswers) lastByCard.set(answer.cardId, answer)
+    const finalAnswers = [...lastByCard.values()]
+    const distribution: Record<Rating, number> = { again: 0, hard: 0, good: 0, easy: 0 }
+    for (const answer of sessionAnswers) distribution[answer.rating]++
+    const reinforcement = finalAnswers.filter(answer => answer.rating === 'again' || answer.rating === 'hard')
+    const meaningful = finalAnswers.filter(answer => answer.rating !== 'again')
+    const earliestNext = meaningful.length ? Math.min(...meaningful.map(answer => new Date(answer.nextReview).getTime())) : null
+    return { uniqueCards: finalAnswers.length, totalAnswers: sessionAnswers.length, distribution, reinforcement, earliestNext }
+  }, [sessionAnswers])
 
   function createDeck(event: FormEvent) {
     event.preventDefault()
@@ -269,26 +298,69 @@ function App() {
     finally { setLoadingImages(false) }
   }
 
+  function confirmLeaveStudy() {
+    if (mode !== 'study') return true
+    return window.confirm('¿Salir del repaso? Las tarjetas que ya calificaste quedan guardadas, pero perderás el resumen de esta sesión.')
+  }
+
   function startStudy(deckId?: string) {
+    if (!confirmLeaveStudy()) return
     const queue = decks.flatMap(item => item.cards
       .filter(card => (!deckId || item.id === deckId) && new Date(card.nextReview) <= new Date())
       .map(card => ({ deckId: item.id, cardId: card.id })))
     if (!queue.length) return
     if (!deckId) setActiveDeck(null)
+    retryCounts.current.clear()
+    setSessionAnswers([])
     setStudyQueue(queue); setStudyIndex(0); setRevealed(false); setMode('study')
+  }
+
+  function finishSession() {
+    setStudyQueue([]); setStudyIndex(0); setRevealed(false); setMode('complete')
   }
 
   function rateCard(rating: Rating) {
     const card = studyCard
-    if (!studyDeck || !card) return
+    const item = studyItem
+    if (!studyDeck || !card || !item) return
     const { interval, ease, dueInMs } = scheduleCard(card, rating)
-    const nextReview = new Date(new Date().getTime() + dueInMs).toISOString()
-    setDecks(current => current.map(item => item.id === studyDeck.id ? { ...item, cards: item.cards.map(candidate => candidate.id === card.id ? { ...candidate, interval, ease, nextReview } : candidate) } : item))
+    const nextReview = new Date(Date.now() + dueInMs).toISOString()
+    setDecks(current => current.map(deckItem => deckItem.id === studyDeck.id
+      ? { ...deckItem, cards: deckItem.cards.map(candidate => candidate.id === card.id ? { ...candidate, interval, ease, nextReview } : candidate) }
+      : deckItem))
+    setSessionAnswers(prev => [...prev, { cardId: card.id, deckId: studyDeck.id, front: card.front, rating, nextReview }])
     setRevealed(false)
-    if (studyIndex >= studyQueue.length - 1) { setStudyIndex(0); setStudyQueue([]); setMode(activeDeck ? 'edit' : 'library') } else setStudyIndex(value => value + 1)
+
+    let queue = studyQueue
+    if (rating === 'again') {
+      const attempts = retryCounts.current.get(card.id) ?? 0
+      if (attempts < SESSION_RETRY_LIMIT) {
+        retryCounts.current.set(card.id, attempts + 1)
+        const gap = Math.max(1, Math.min(RETRY_GAP, queue.length - studyIndex - 1))
+        const insertAt = Math.min(queue.length, studyIndex + 1 + gap)
+        queue = [...queue.slice(0, insertAt), item, ...queue.slice(insertAt)]
+        setStudyQueue(queue)
+      }
+    }
+
+    if (studyIndex + 1 < queue.length) setStudyIndex(value => value + 1)
+    else finishSession()
   }
 
-  function goHome() { setMode('library'); setActiveDeck(null); setStudyQueue([]); setRevealed(false) }
+  function exitStudy() {
+    if (!confirmLeaveStudy()) return
+    const destination = activeDeck ? 'edit' : 'library'
+    setStudyQueue([]); setStudyIndex(0); setRevealed(false); setSessionAnswers([])
+    setMode(destination)
+  }
+
+  function backToDeck() { setSessionAnswers([]); setMode('edit') }
+  function backToLibrary() { setSessionAnswers([]); setActiveDeck(null); setMode('library') }
+
+  function goHome() {
+    if (!confirmLeaveStudy()) return
+    setMode('library'); setActiveDeck(null); setStudyQueue([]); setRevealed(false); setSessionAnswers([])
+  }
 
   function handleExport() {
     const backup = { version: 1, exportedAt: today(), decks }
@@ -329,6 +401,29 @@ function App() {
     setImportSuccess(strategy === 'replace' ? 'Tu biblioteca fue reemplazada con el archivo importado.' : 'El archivo se combinó con tu biblioteca actual.')
   }
 
+  useEffect(() => {
+    if (mode !== 'study') return
+    function handleKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return
+      if (event.key === ' ' || event.key === 'Enter') {
+        if (tag === 'BUTTON') return
+        event.preventDefault()
+        if (!revealed) setRevealed(true)
+        return
+      }
+      if (!revealed) return
+      const ratingIndex = ['1', '2', '3', '4'].indexOf(event.key)
+      if (ratingIndex === -1) return
+      event.preventDefault()
+      rateCard(RATINGS[ratingIndex])
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, revealed, studyCard, studyDeck, studyIndex, studyQueue])
+
   return (
     <div className="app-shell">
       <header>
@@ -364,7 +459,7 @@ function App() {
         {showDeckForm && <form className="deck-form" onSubmit={createDeck}><input autoFocus placeholder="Nombre del mazo" value={deckTitle} onChange={e => setDeckTitle(e.target.value)}/><input placeholder="Categoría o temática" value={deckCategory} onChange={e => setDeckCategory(e.target.value)}/><button className="primary">Crear</button><button type="button" onClick={() => setShowDeckForm(false)}>Cancelar</button></form>}
         <section className="deck-grid">
           {decks.map((item, index) => {
-            const due = item.cards.filter(card => new Date(card.nextReview) <= new Date()).length
+            const due = item.cards.filter(card => isDue(card.nextReview, now)).length
             return <div className="deck" key={item.id} style={{'--deck-color': item.color} as React.CSSProperties}>
               <div className="deck-top">
                 <span className="deck-number">0{index + 1}</span>
@@ -419,7 +514,7 @@ function App() {
       </main>}
 
       {mode === 'study' && studyCard && studyDeck && <main className="study">
-        <button className="back" onClick={() => setMode(activeDeck ? 'edit' : 'library')}>← Salir del repaso</button>
+        <button className="back" onClick={exitStudy}>← Salir del repaso</button>
         <>
           <div className="progress"><span>{studyIndex + 1} de {studyQueue.length}</span><i><b style={{width: `${((studyIndex + 1) / studyQueue.length) * 100}%`}}/></i></div>
           <button className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
@@ -436,6 +531,36 @@ function App() {
             </button>)}
           </div></div>}
         </>
+      </main>}
+
+      {mode === 'complete' && <main className="study">
+        <div className="complete">
+          <span>✓</span>
+          <p className="eyebrow">SESIÓN COMPLETADA</p>
+          <h1>Buen trabajo</h1>
+          <p>Repasaste {sessionSummary.uniqueCards} tarjeta{sessionSummary.uniqueCards === 1 ? '' : 's'} · {sessionSummary.totalAnswers} respuesta{sessionSummary.totalAnswers === 1 ? '' : 's'} en total</p>
+
+          <div className="rating-breakdown">
+            {RATINGS.map(rating => <div key={rating} className={rating}>
+              <span>{RATING_META[rating].icon}</span><strong>{sessionSummary.distribution[rating]}</strong><small>{RATING_META[rating].label}</small>
+            </div>)}
+          </div>
+
+          {sessionSummary.reinforcement.length > 0 && <div className="reinforcement">
+            <p className="eyebrow">PARA REFORZAR</p>
+            <ul>{sessionSummary.reinforcement.slice(0, 6).map(item => <li key={item.cardId}>{item.front}</li>)}</ul>
+            {sessionSummary.reinforcement.length > 6 && <small>y {sessionSummary.reinforcement.length - 6} más</small>}
+          </div>}
+
+          {sessionSummary.earliestNext !== null && <p className="next-review">
+            Próximo repaso disponible: <b>{sessionSummary.earliestNext <= Date.now() ? 'Hoy' : formatDue(sessionSummary.earliestNext - Date.now())}</b>
+          </p>}
+
+          <div className="complete-actions">
+            {activeDeck && <button className="primary" onClick={backToDeck}>Volver al mazo</button>}
+            <button className="ghost" onClick={backToLibrary}>Ir a la biblioteca</button>
+          </div>
+        </div>
       </main>}
     </div>
   )
