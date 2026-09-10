@@ -4,6 +4,8 @@ import './App.css'
 import type { Card, Deck, Rating, SessionAnswer, StudyItem } from './study'
 import { DAY, RATINGS, buildStudyQueue, computeProgress, computeSessionSummary, isDue, scheduleCard, scheduleRetry, today } from './study'
 import { mergeDecks, parseStoredLibrary, validateBackup } from './backup'
+import { nextMenuIndex } from './menu'
+import type { MenuNavKey } from './menu'
 
 type ImportStrategy = 'merge' | 'replace'
 type DeckModal = { type: 'create' } | { type: 'edit'; deckId: string }
@@ -64,10 +66,28 @@ async function searchCommons(query: string) {
   })).filter((item: { url?: string }) => item.url)
 }
 
+const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 function ModalSheet({ labelledBy, onClose, children }: { labelledBy: string; onClose: () => void; children: ReactNode }) {
+  const panelRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
     function handleKey(event: KeyboardEvent) {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') { onClose(); return }
+      if (event.key !== 'Tab') return
+      const panel = panelRef.current
+      if (!panel) return
+      const focusable = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(el => el.offsetParent !== null)
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      const inPanel = active ? panel.contains(active) : false
+      if (event.shiftKey) {
+        if (!inPanel || active === first) { event.preventDefault(); last.focus() }
+      } else if (!inPanel || active === last) {
+        event.preventDefault(); first.focus()
+      }
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
@@ -75,7 +95,7 @@ function ModalSheet({ labelledBy, onClose, children }: { labelledBy: string; onC
 
   return (
     <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby={labelledBy}>
+      <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby={labelledBy} ref={panelRef}>
         <button type="button" className="close" aria-label="Cerrar" onClick={onClose}>✕</button>
         {children}
       </div>
@@ -127,13 +147,12 @@ function ActionMenu({
   }, [isOpen])
 
   function handleListKeyDown(event: React.KeyboardEvent) {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return
     event.preventDefault()
     const menuItems = [...(listRef.current?.querySelectorAll('[role="menuitem"]') ?? [])] as HTMLElement[]
     if (!menuItems.length) return
     const currentIndex = menuItems.indexOf(document.activeElement as HTMLElement)
-    const delta = event.key === 'ArrowDown' ? 1 : -1
-    const nextIndex = (currentIndex + delta + menuItems.length) % menuItems.length
+    const nextIndex = nextMenuIndex(currentIndex, event.key as MenuNavKey, menuItems.length)
     menuItems[nextIndex]?.focus()
   }
 
@@ -159,7 +178,7 @@ function ActionMenu({
           onMouseDown={event => event.stopPropagation()}
           onKeyDown={handleListKeyDown}
         >
-          {note && <p className="action-menu-note">{note}</p>}
+          {note && <p className="action-menu-note" role="presentation">{note}</p>}
           {items.map(item => (
             <button
               key={item.label}
@@ -637,7 +656,7 @@ function App() {
         <main className="onboarding">
           <p className="eyebrow">BIENVENIDO</p>
           <h1>Antes de<br/><em>empezar.</em></h1>
-          <p>Puedes explorar Bluelearn con mazos de ejemplo o arrancar con una biblioteca vacía. Podrás cambiarlo cuando quieras.</p>
+          <p>Puedes explorar Bluelearn con mazos de ejemplo o arrancar con una biblioteca vacía. Los mazos de ejemplo se pueden eliminar cuando quieras, y siempre podrás crear los tuyos propios.</p>
           <div className="onboarding-actions">
             <button type="button" className="primary" onClick={() => chooseOnboarding('sample')}>Explorar ejemplo</button>
             <button type="button" className="ghost" onClick={() => chooseOnboarding('empty')}>Comenzar desde cero</button>
@@ -684,7 +703,7 @@ function App() {
         </div>
         {importError && <div className="import-banner error" role="alert"><span>⚠ {importError}</span><button type="button" className="ack" aria-label="Cerrar aviso" onClick={() => setImportError(null)}>✕</button></div>}
         {importSuccess && <div className="import-banner success" role="status"><span>✓ {importSuccess}</span><button type="button" className="ack" aria-label="Cerrar aviso" onClick={() => setImportSuccess(null)}>✕</button></div>}
-        {pendingImport && <div className="import-banner confirm" role="alertdialog" aria-label="Confirmar importación">
+        {pendingImport && <div className="import-banner confirm" role="group" aria-live="polite" aria-label="Confirmar importación">
           <span>Encontramos {pendingImport.length} mazos y {pendingImport.reduce((sum, item) => sum + item.cards.length, 0)} tarjetas en el archivo. ¿Qué quieres hacer?</span>
           <div className="import-confirm-actions">
             <button type="button" className="primary" onClick={() => applyImport('merge')}>Combinar</button>
