@@ -49,6 +49,8 @@ export function isDue(nextReview: string, now: number) {
   return new Date(nextReview).getTime() <= now
 }
 
+export function today() { return new Date().toISOString() }
+
 // A deck can always be practiced once it has cards: due cards when some are pending,
 // otherwise every card in scope so studying is never blocked on the schedule.
 export function buildStudyQueue(decks: Deck[], deckId?: string, practiceAll = false, now = Date.now()): StudyItem[] {

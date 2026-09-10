@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
 import type { Card, Deck, Rating, SessionAnswer, StudyItem } from './study'
-import { DAY, RATINGS, buildStudyQueue, computeProgress, computeSessionSummary, isDue, scheduleCard, scheduleRetry } from './study'
+import { DAY, RATINGS, buildStudyQueue, computeProgress, computeSessionSummary, isDue, scheduleCard, scheduleRetry, today } from './study'
+import { mergeDecks, parseStoredLibrary, validateBackup } from './backup'
 
 type ImportStrategy = 'merge' | 'replace'
 type DeckModal = { type: 'create' } | { type: 'edit'; deckId: string }
@@ -31,7 +32,6 @@ const starterDecks: Deck[] = [
 ]
 
 function uid() { return crypto.randomUUID() }
-function today() { return new Date().toISOString() }
 function withColors(list: Deck[]): Deck[] { return list.map((item, index) => ({ ...item, color: COLORS[index % COLORS.length] })) }
 
 function formatDue(ms: number) {
@@ -48,63 +48,6 @@ function formatDue(ms: number) {
 function dueLabel(nextReview: string) {
   const diff = new Date(nextReview).getTime() - Date.now()
   return diff <= 0 ? 'Hoy' : formatDue(diff)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function validateBackup(data: unknown): { ok: true; decks: Deck[] } | { ok: false; error: string } {
-  const list = Array.isArray(data) ? data : isRecord(data) ? data.decks : undefined
-  if (!Array.isArray(list)) return { ok: false, error: 'El archivo no tiene el formato de backup de Bluelearn (falta la lista de mazos).' }
-  const decks: Deck[] = []
-  for (let i = 0; i < list.length; i++) {
-    const rawDeck = list[i]
-    if (!isRecord(rawDeck)) return { ok: false, error: `El mazo #${i + 1} no es un objeto válido.` }
-    const { id, title, category, cards } = rawDeck
-    if (typeof id !== 'string' || !id) return { ok: false, error: `El mazo #${i + 1} no tiene un "id" válido.` }
-    if (typeof title !== 'string' || !title.trim()) return { ok: false, error: `El mazo #${i + 1} no tiene un "title" válido.` }
-    if (!Array.isArray(cards)) return { ok: false, error: `El mazo "${title}" no tiene una lista de tarjetas válida.` }
-    const validCards: Card[] = []
-    for (let j = 0; j < cards.length; j++) {
-      const rawCard = cards[j]
-      if (!isRecord(rawCard)) return { ok: false, error: `La tarjeta #${j + 1} del mazo "${title}" no es un objeto válido.` }
-      const { id: cardId, front, back } = rawCard
-      if (typeof cardId !== 'string' || !cardId) return { ok: false, error: `La tarjeta #${j + 1} del mazo "${title}" no tiene un "id" válido.` }
-      if (typeof front !== 'string' || !front.trim()) return { ok: false, error: `La tarjeta #${j + 1} del mazo "${title}" no tiene una pregunta ("front") válida.` }
-      if (typeof back !== 'string' || !back.trim()) return { ok: false, error: `La tarjeta #${j + 1} del mazo "${title}" no tiene una respuesta ("back") válida.` }
-      const nextReview = typeof rawCard.nextReview === 'string' && !Number.isNaN(new Date(rawCard.nextReview).getTime()) ? rawCard.nextReview : today()
-      validCards.push({
-        id: cardId, front, back,
-        description: typeof rawCard.description === 'string' ? rawCard.description : '',
-        image: typeof rawCard.image === 'string' && rawCard.image ? rawCard.image : undefined,
-        nextReview,
-        interval: typeof rawCard.interval === 'number' && Number.isFinite(rawCard.interval) ? rawCard.interval : 0,
-        ease: typeof rawCard.ease === 'number' && Number.isFinite(rawCard.ease) ? rawCard.ease : 2.5,
-      })
-    }
-    decks.push({
-      id, title,
-      category: typeof category === 'string' && category.trim() ? category : 'General',
-      color: COLORS[0],
-      cards: validCards,
-      isDemo: typeof rawDeck.isDemo === 'boolean' ? rawDeck.isDemo : undefined,
-    })
-  }
-  return { ok: true, decks }
-}
-
-function mergeDecks(local: Deck[], incoming: Deck[]): Deck[] {
-  const merged = [...local]
-  for (const incomingDeck of incoming) {
-    const existingIndex = merged.findIndex(item => item.id === incomingDeck.id)
-    if (existingIndex === -1) { merged.push(incomingDeck); continue }
-    const existing = merged[existingIndex]
-    const cardMap = new Map(existing.cards.map(card => [card.id, card]))
-    for (const card of incomingDeck.cards) cardMap.set(card.id, card)
-    merged[existingIndex] = { ...existing, cards: [...cardMap.values()] }
-  }
-  return merged
 }
 
 async function searchCommons(query: string) {
@@ -232,22 +175,24 @@ function ActionMenu({
   )
 }
 
-function readInitialLibraryState(): { decks: Deck[]; needsOnboarding: boolean } {
+type RecoveryState = { raw: string; error: string }
+type InitialLibraryState = { decks: Deck[]; needsOnboarding: boolean; recovery: RecoveryState | null }
+
+function readInitialLibraryState(): InitialLibraryState {
   let saved: string | null
   try { saved = localStorage.getItem(DECKS_KEY) } catch { saved = null }
-  if (saved === null) return { decks: [], needsOnboarding: true }
-  try {
-    const parsed = JSON.parse(saved)
-    if (Array.isArray(parsed)) return { decks: withColors(parsed), needsOnboarding: false }
-    return { decks: [], needsOnboarding: true }
-  } catch {
-    return { decks: [], needsOnboarding: true }
-  }
+  const result = parseStoredLibrary(saved)
+  if (result.status === 'empty') return { decks: [], needsOnboarding: true, recovery: null }
+  if (result.status === 'corrupted') return { decks: [], needsOnboarding: false, recovery: { raw: saved as string, error: result.error } }
+  return { decks: withColors(result.decks), needsOnboarding: false, recovery: null }
 }
 
 function App() {
-  const [decks, setDecks] = useState<Deck[]>(() => readInitialLibraryState().decks)
-  const [needsOnboarding, setNeedsOnboarding] = useState(() => readInitialLibraryState().needsOnboarding)
+  const [initialLibrary] = useState(readInitialLibraryState)
+  const [decks, setDecks] = useState<Deck[]>(initialLibrary.decks)
+  const [needsOnboarding, setNeedsOnboarding] = useState(initialLibrary.needsOnboarding)
+  const [recovery, setRecovery] = useState<RecoveryState | null>(initialLibrary.recovery)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [activeDeck, setActiveDeck] = useState<string | null>(null)
   const [mode, setMode] = useState<'library' | 'edit' | 'study' | 'complete'>('library')
   const [openMenu, setOpenMenu] = useState<string | null>(null)
@@ -292,9 +237,14 @@ function App() {
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    if (needsOnboarding) return
-    localStorage.setItem(DECKS_KEY, JSON.stringify(decks))
-  }, [decks, needsOnboarding])
+    if (needsOnboarding || recovery) return
+    try {
+      localStorage.setItem(DECKS_KEY, JSON.stringify(decks))
+      setSaveError(null)
+    } catch {
+      setSaveError('No pudimos guardar tus últimos cambios en este dispositivo. Puede que el almacenamiento esté lleno o bloqueado; tus cambios solo existen en esta pestaña por ahora.')
+    }
+  }, [decks, needsOnboarding, recovery])
 
   useEffect(() => { setOpenMenu(null) }, [mode, activeDeck, deckModal, cardModal])
 
@@ -304,6 +254,24 @@ function App() {
   function chooseOnboarding(choice: 'sample' | 'empty') {
     setDecks(choice === 'sample' ? starterDecks : [])
     setNeedsOnboarding(false)
+  }
+
+  function downloadRecoveryBackup() {
+    if (!recovery) return
+    const blob = new Blob([recovery.raw], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `bluelearn-recuperacion-${new Date().toISOString().slice(0, 10)}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function resetCorruptedLibrary() {
+    if (!window.confirm('Esto borrará de forma permanente los datos guardados que no se pudieron leer. Ya descargaste (o decidiste no descargar) una copia. ¿Confirmas que quieres reiniciar la biblioteca?')) return
+    try { localStorage.removeItem(DECKS_KEY) } catch {}
+    setRecovery(null)
+    setNeedsOnboarding(true)
   }
 
   useEffect(() => {
@@ -606,10 +574,19 @@ function App() {
         `Vas a reemplazar tu biblioteca actual (${decks.length} mazos, ${totalCards} tarjetas) por la del archivo (${incoming.length} mazos, ${incomingCards} tarjetas). Esta acción no se puede deshacer. ¿Confirmas el reemplazo?`
       )
       if (!confirmed) return
+      setDecks(withColors(incoming))
+      setPendingImport(null)
+      setImportSuccess(`Tu biblioteca fue reemplazada con el archivo importado (${incoming.length} mazos, ${incomingCards} tarjetas).`)
+      return
     }
-    setDecks(current => withColors(strategy === 'replace' ? incoming : mergeDecks(current, incoming)))
+    const { decks: mergedDecks, stats } = mergeDecks(decks, incoming)
+    setDecks(withColors(mergedDecks))
     setPendingImport(null)
-    setImportSuccess(strategy === 'replace' ? 'Tu biblioteca fue reemplazada con el archivo importado.' : 'El archivo se combinó con tu biblioteca actual.')
+    const parts: string[] = []
+    if (stats.addedDecks) parts.push(`${stats.addedDecks} mazo${stats.addedDecks === 1 ? '' : 's'} nuevo${stats.addedDecks === 1 ? '' : 's'}`)
+    if (stats.addedCards) parts.push(`${stats.addedCards} tarjeta${stats.addedCards === 1 ? '' : 's'} nueva${stats.addedCards === 1 ? '' : 's'}`)
+    if (stats.updatedCards) parts.push(`${stats.updatedCards} tarjeta${stats.updatedCards === 1 ? '' : 's'} actualizada${stats.updatedCards === 1 ? '' : 's'}`)
+    setImportSuccess(parts.length ? `Combinado con tu biblioteca: ${parts.join(', ')}.` : 'El archivo se combinó con tu biblioteca actual (sin cambios nuevos).')
   }
 
   useEffect(() => {
@@ -635,6 +612,24 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, revealed, studyCard, studyDeck, studyIndex, studyQueue])
 
+  if (recovery) {
+    return (
+      <div className="app-shell">
+        <header><button className="brand" disabled><span>◒</span> Bluelearn</button></header>
+        <main className="onboarding">
+          <p className="eyebrow">RECUPERACIÓN</p>
+          <h1>Algo no<br/><em>cuadra.</em></h1>
+          <p>No pudimos leer la biblioteca guardada en este dispositivo: {recovery.error}</p>
+          <p>Tus datos originales siguen intactos y no se han tocado. Descárgalos para revisarlos o guardarlos antes de decidir qué hacer.</p>
+          <div className="onboarding-actions">
+            <button type="button" className="primary" onClick={downloadRecoveryBackup}>⇩ Descargar copia</button>
+            <button type="button" className="ghost danger-text" onClick={resetCorruptedLibrary}>Reiniciar biblioteca</button>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
   if (needsOnboarding) {
     return (
       <div className="app-shell">
@@ -659,6 +654,11 @@ function App() {
         <button className="brand" onClick={goHome}><span>◒</span> Bluelearn</button>
         <nav><button className={mode === 'library' ? 'active' : ''} onClick={goHome}>Biblioteca</button><button disabled={!totalDue} onClick={() => startStudy()}>Repasar <b>{totalDue}</b></button></nav>
       </header>
+
+      {saveError && <div className="import-banner error save-error" role="alert">
+        <span>⚠ {saveError}</span>
+        <button type="button" className="ack" aria-label="Cerrar aviso" onClick={() => setSaveError(null)}>✕</button>
+      </div>}
 
       {mode === 'library' && <main>
         <section className="hero-copy"><p className="eyebrow">TU BIBLIOTECA DE APRENDIZAJE</p><h1>Aprender, recordar,<br/><em>crecer.</em></h1><p>Convierte cualquier tema en conocimiento que permanece.</p></section>
