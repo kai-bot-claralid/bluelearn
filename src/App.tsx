@@ -1,48 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import './App.css'
+import type { Card, Deck, Rating, SessionAnswer, StudyItem } from './study'
+import { DAY, RATINGS, buildStudyQueue, computeProgress, computeSessionSummary, isDue, scheduleCard, scheduleRetry } from './study'
 
-type Card = {
-  id: string
-  front: string
-  back: string
-  description: string
-  image?: string
-  nextReview: string
-  interval: number
-  ease: number
-}
-
-type Deck = {
-  id: string
-  title: string
-  category: string
-  color: string
-  cards: Card[]
-  isDemo?: boolean
-}
-
-type StudyItem = { deckId: string; cardId: string }
-type Rating = 'again' | 'hard' | 'good' | 'easy'
 type ImportStrategy = 'merge' | 'replace'
-type SessionAnswer = { cardId: string; deckId: string; front: string; rating: Rating; nextReview: string }
 type DeckModal = { type: 'create' } | { type: 'edit'; deckId: string }
 type CardModal = { type: 'create' } | { type: 'edit'; cardId: string }
 
-const DAY = 86_400_000
 const COLORS = ['#1769ff', '#ff6b5f', '#f4b942', '#24a47f', '#8b5cf6']
-const MIN_EASE = 1.3
-const EASE_DELTA: Record<Rating, number> = { again: -0.3, hard: -0.15, good: 0, easy: 0.15 }
-const RATINGS: Rating[] = ['again', 'hard', 'good', 'easy']
 const RATING_META: Record<Rating, { label: string; icon: string }> = {
   again: { label: 'Otra vez', icon: '↺' },
   hard: { label: 'Difícil', icon: '−' },
   good: { label: 'Bien', icon: '✓' },
   easy: { label: 'Fácil', icon: '✦' },
 }
-// Same-session "otra vez" retries: how many extra chances a card gets, and how far back in the queue it reappears.
-const SESSION_RETRY_LIMIT = 2
-const RETRY_GAP = 3
 const DUE_REFRESH_MS = 20_000
 const DECKS_KEY = 'bluelearn-decks'
 
@@ -62,19 +34,6 @@ function uid() { return crypto.randomUUID() }
 function today() { return new Date().toISOString() }
 function withColors(list: Deck[]): Deck[] { return list.map((item, index) => ({ ...item, color: COLORS[index % COLORS.length] })) }
 
-function scheduleCard(card: Card, rating: Rating) {
-  const ease = Math.round(Math.max(MIN_EASE, card.ease + EASE_DELTA[rating]) * 100) / 100
-  const base = card.interval || 1
-  let days: number
-  if (rating === 'again') days = 0
-  else if (rating === 'hard') days = Math.max(1, base * 1.2)
-  else if (rating === 'good') days = card.interval ? base * ease : 1
-  else days = Math.max(4, (card.interval ? base * ease : 4) * 1.3)
-  days = Math.round(days * 100) / 100
-  const dueInMs = rating === 'again' ? 10 * 60_000 : days * DAY
-  return { interval: days, ease, dueInMs }
-}
-
 function formatDue(ms: number) {
   const minutes = ms / 60_000
   if (minutes < 60) return `${Math.max(1, Math.round(minutes))} min`
@@ -89,10 +48,6 @@ function formatDue(ms: number) {
 function dueLabel(nextReview: string) {
   const diff = new Date(nextReview).getTime() - Date.now()
   return diff <= 0 ? 'Hoy' : formatDue(diff)
-}
-
-function isDue(nextReview: string, now: number) {
-  return new Date(nextReview).getTime() <= now
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -363,6 +318,7 @@ function App() {
   const studyItem = studyQueue[studyIndex]
   const studyDeck = decks.find(item => item.id === studyItem?.deckId)
   const studyCard = studyDeck?.cards.find(card => card.id === studyItem?.cardId)
+  const studyProgress = useMemo(() => computeProgress(studyQueue, studyIndex), [studyQueue, studyIndex])
 
   const isDeckFormDirty = deckModal !== null && (deckTitle.trim() !== deckFormInitial.current.title.trim() || deckCategory.trim() !== deckFormInitial.current.category.trim())
   const isCardFormDirty = cardModal !== null && !cardSaved && (
@@ -372,17 +328,7 @@ function App() {
     selectedImage !== cardFormInitial.current.image
   )
 
-  const sessionSummary = useMemo(() => {
-    const lastByCard = new Map<string, SessionAnswer>()
-    for (const answer of sessionAnswers) lastByCard.set(answer.cardId, answer)
-    const finalAnswers = [...lastByCard.values()]
-    const distribution: Record<Rating, number> = { again: 0, hard: 0, good: 0, easy: 0 }
-    for (const answer of sessionAnswers) distribution[answer.rating]++
-    const reinforcement = finalAnswers.filter(answer => answer.rating === 'again' || answer.rating === 'hard')
-    const meaningful = finalAnswers.filter(answer => answer.rating !== 'again')
-    const earliestNext = meaningful.length ? Math.min(...meaningful.map(answer => new Date(answer.nextReview).getTime())) : null
-    return { uniqueCards: finalAnswers.length, totalAnswers: sessionAnswers.length, distribution, reinforcement, earliestNext }
-  }, [sessionAnswers])
+  const sessionSummary = useMemo(() => computeSessionSummary(sessionAnswers), [sessionAnswers])
 
   useEffect(() => {
     const dirty = isDeckFormDirty || isCardFormDirty
@@ -561,12 +507,10 @@ function App() {
     return window.confirm('¿Salir del repaso? Las tarjetas que ya calificaste quedan guardadas, pero perderás el resumen de esta sesión.')
   }
 
-  function startStudy(deckId?: string) {
+  function startStudy(deckId?: string, practiceAll = false) {
     if (!confirmDiscardChanges()) return
     if (!confirmLeaveStudy()) return
-    const queue = decks.flatMap(item => item.cards
-      .filter(card => (!deckId || item.id === deckId) && new Date(card.nextReview) <= new Date())
-      .map(card => ({ deckId: item.id, cardId: card.id })))
+    const queue = buildStudyQueue(decks, deckId, practiceAll, Date.now())
     if (!queue.length) return
     if (!deckId) setActiveDeck(null)
     retryCounts.current.clear()
@@ -593,11 +537,10 @@ function App() {
     let queue = studyQueue
     if (rating === 'again') {
       const attempts = retryCounts.current.get(card.id) ?? 0
-      if (attempts < SESSION_RETRY_LIMIT) {
+      const retry = scheduleRetry(queue, studyIndex, item, attempts)
+      if (retry.requeued) {
         retryCounts.current.set(card.id, attempts + 1)
-        const gap = Math.max(1, Math.min(RETRY_GAP, queue.length - studyIndex - 1))
-        const insertAt = Math.min(queue.length, studyIndex + 1 + gap)
-        queue = [...queue.slice(0, insertAt), item, ...queue.slice(insertAt)]
+        queue = retry.queue
         setStudyQueue(queue)
       }
     }
@@ -801,7 +744,11 @@ function App() {
                 { label: '✕ Eliminar mazo', onSelect: () => handleDeleteDeck(deck), danger: true },
               ]}
             />
-            <button className="primary" disabled={!dueCards.length} onClick={() => startStudy(deck.id)}>Repasar ahora →</button>
+            <button
+              className="primary"
+              disabled={!deck.cards.length}
+              onClick={() => startStudy(deck.id, dueCards.length === 0)}
+            >{dueCards.length ? 'Repasar ahora →' : 'Practicar mazo →'}</button>
           </div>
         </section>
         <section className="card-list">
@@ -838,7 +785,13 @@ function App() {
       {mode === 'study' && studyCard && studyDeck && <main className="study">
         <button className="back" onClick={exitStudy}>← Salir del repaso</button>
         <>
-          <div className="progress"><span>{studyIndex + 1} de {studyQueue.length}</span><i><b style={{width: `${((studyIndex + 1) / studyQueue.length) * 100}%`}}/></i></div>
+          <div className="progress">
+            <span>
+              {studyProgress.distinctSeen} de {studyProgress.totalCards}
+              {studyProgress.repeats > 0 && <small> · +{studyProgress.repeats} repaso{studyProgress.repeats === 1 ? '' : 's'}</small>}
+            </span>
+            <i><b style={{width: `${(studyProgress.distinctSeen / studyProgress.totalCards) * 100}%`}}/></i>
+          </div>
           <button ref={flashcardRef} className={`flashcard ${revealed ? 'revealed' : ''}`} onClick={() => setRevealed(true)} aria-label={revealed ? 'Respuesta revelada' : 'Toca para revelar la respuesta'}>
             <span className="study-deck" style={{background: studyDeck.color}}>{studyDeck.title}</span>
             {studyCard.image && <img src={studyCard.image} alt=""/>}
